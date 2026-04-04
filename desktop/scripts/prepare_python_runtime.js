@@ -6,6 +6,41 @@ function copyDir(src, dest) {
   fs.cpSync(src, dest, { recursive: true, force: true });
 }
 
+function removeIfExists(targetPath) {
+  if (fs.existsSync(targetPath)) {
+    fs.rmSync(targetPath, { recursive: true, force: true });
+  }
+}
+
+function pruneRuntime(runtimeRoot) {
+  const sitePackages = path.join(runtimeRoot, "Lib", "site-packages");
+  const torchDir = path.join(sitePackages, "torch");
+
+  removeIfExists(path.join(torchDir, "include"));
+  removeIfExists(path.join(torchDir, "share"));
+  removeIfExists(path.join(torchDir, "bin"));
+
+  const torchLibDir = path.join(torchDir, "lib");
+  if (fs.existsSync(torchLibDir)) {
+    for (const entry of fs.readdirSync(torchLibDir)) {
+      const fullPath = path.join(torchLibDir, entry);
+      const ext = path.extname(entry).toLowerCase();
+      if ([".lib", ".exp", ".pdb"].includes(ext)) {
+        removeIfExists(fullPath);
+      }
+    }
+  }
+
+  if (fs.existsSync(sitePackages)) {
+    for (const entry of fs.readdirSync(sitePackages)) {
+      const fullPath = path.join(sitePackages, entry);
+      if (entry.endsWith(".whl") || entry === "__pycache__") {
+        removeIfExists(fullPath);
+      }
+    }
+  }
+}
+
 function main() {
   const desktopRoot = path.resolve(__dirname, "..");
   const workspaceRoot = path.resolve(desktopRoot, "..");
@@ -26,6 +61,7 @@ function main() {
   console.log(`[runtime] staging python runtime from ${runtimeSource}`);
   fs.rmSync(runtimeDest, { recursive: true, force: true });
   copyDir(runtimeSource, runtimeDest);
+  pruneRuntime(runtimeDest);
 
   const winExe = path.join(runtimeDest, "Scripts", "python.exe");
   const directExe = path.join(runtimeDest, "python.exe");
