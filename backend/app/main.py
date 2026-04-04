@@ -228,6 +228,7 @@ def healthz() -> dict:
     return {
         "status": "ok" if iopaint_available else "degraded",
         "iopaint_available": iopaint_available,
+        "instance_token": os.getenv("BACKEND_INSTANCE_TOKEN"),
         "model": "lama",
         "warmup": WarmupResponse(status=warmup_status, progress=warmup_progress).model_dump(),
         "progress_schema": {"stage": "string", "percent": "number", "error": "string|null"},

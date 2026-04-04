@@ -2,6 +2,8 @@ const { spawn } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 const http = require("node:http");
+const net = require("node:net");
+const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { app } = require("electron");
 
@@ -14,7 +16,8 @@ class BackendManager extends EventEmitter {
   constructor(options = {}) {
     super();
     this.host = options.host || "127.0.0.1";
-    this.port = options.port || 8000;
+    this.preferredPort = options.port || 8000;
+    this.port = this.preferredPort;
     this.startupTimeoutMs = Number(process.env.BACKEND_STARTUP_TIMEOUT_MS || DEFAULT_STARTUP_TIMEOUT_MS);
     this.restartAttempts = 0;
     this.status = {
@@ -26,6 +29,7 @@ class BackendManager extends EventEmitter {
     };
     this.process = null;
     this.shuttingDown = false;
+    this.instanceToken = null;
   }
 
   getBackendRoot() {
@@ -111,6 +115,7 @@ class BackendManager extends EventEmitter {
     const backendRoot = this.getBackendRoot();
     const pythonPath = this.getPythonExecutable();
     const localModelsDir = this.ensureLocalModelsReady();
+    this.port = await this.selectStartupPort();
 
     if (!fs.existsSync(backendRoot)) {
       const err = `Backend directory not found: ${backendRoot}`;
@@ -140,6 +145,8 @@ class BackendManager extends EventEmitter {
       MODEL_DIR: process.env.MODEL_DIR || localModelsDir,
       IOPAINT_LOCAL_FILES_ONLY: process.env.IOPAINT_LOCAL_FILES_ONLY || "1",
     };
+    this.instanceToken = crypto.randomUUID();
+    env.BACKEND_INSTANCE_TOKEN = this.instanceToken;
 
     this.process = spawn(pythonPath, args, {
       cwd: backendRoot,
@@ -209,6 +216,50 @@ class BackendManager extends EventEmitter {
     throw err;
   }
 
+  async selectStartupPort() {
+    const preferredFree = await this.isPortFree(this.preferredPort);
+    if (preferredFree) {
+      return this.preferredPort;
+    }
+
+    const fallback = await this.findFreePort();
+    this.emit("log", {
+      level: "info",
+      message: `Preferred backend port ${this.preferredPort} is busy. Falling back to ${fallback}.`,
+    });
+    return fallback;
+  }
+
+  async isPortFree(port) {
+    return new Promise((resolve) => {
+      const server = net.createServer();
+      server.once("error", () => {
+        resolve(false);
+      });
+      server.once("listening", () => {
+        server.close(() => resolve(true));
+      });
+      server.listen(port, this.host);
+    });
+  }
+
+  async findFreePort() {
+    return new Promise((resolve, reject) => {
+      const server = net.createServer();
+      server.once("error", reject);
+      server.once("listening", () => {
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          server.close(() => reject(new Error("Failed to resolve free backend port")));
+          return;
+        }
+        const freePort = address.port;
+        server.close(() => resolve(freePort));
+      });
+      server.listen(0, this.host);
+    });
+  }
+
   async pingHealth() {
     return new Promise((resolve) => {
       const req = http.get(this.healthUrl(), (res) => {
@@ -223,7 +274,10 @@ class BackendManager extends EventEmitter {
         res.on("end", () => {
           try {
             const parsed = JSON.parse(body);
-            resolve(Boolean(parsed.iopaint_available));
+            const tokenMatches = parsed.instance_token && this.instanceToken
+              ? parsed.instance_token === this.instanceToken
+              : true;
+            resolve(Boolean(parsed.iopaint_available) && tokenMatches);
           } catch {
             resolve(false);
           }
