@@ -22,3 +22,28 @@ contextBridge.exposeInMainWorld("backend", {
     return () => ipcRenderer.removeListener("backend:log", wrapped);
   },
 });
+
+contextBridge.exposeInMainWorld("updater", {
+  acceptInstall: () => ipcRenderer.invoke("updater:accept-install"),
+  deferInstall: () => ipcRenderer.invoke("updater:defer-install"),
+  onUpdateAvailable: (listener) => {
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on("updater:update-available", wrapped);
+    return () => ipcRenderer.removeListener("updater:update-available", wrapped);
+  },
+  onUpdateDownloaded: (listener) => {
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on("updater:update-downloaded", wrapped);
+    return () => ipcRenderer.removeListener("updater:update-downloaded", wrapped);
+  },
+  onDownloadProgress: (listener) => {
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on("updater:download-progress", wrapped);
+    return () => ipcRenderer.removeListener("updater:download-progress", wrapped);
+  },
+  onError: (listener) => {
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on("updater:error", wrapped);
+    return () => ipcRenderer.removeListener("updater:error", wrapped);
+  },
+});

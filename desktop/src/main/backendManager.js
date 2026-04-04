@@ -500,6 +500,35 @@ class BackendManager extends EventEmitter {
     });
   }
 
+  async warmup() {
+    if (!this.process || !this.status.ready) {
+      return;
+    }
+
+    try {
+      this.setStatus({ state: "warming", ready: false });
+      this.emit("log", {
+        level: "info",
+        message: "Preloading model into memory...",
+      });
+
+      await this.requestJson("POST", "/warmup", null);
+
+      this.setStatus({ state: "ready", ready: true });
+      this.emit("log", {
+        level: "info",
+        message: "Model preload complete.",
+      });
+    } catch (error) {
+      this.emit("log", {
+        level: "warn",
+        message: `Model preload failed (non-critical): ${error?.message || error}`,
+      });
+      // Warmup failure is not critical; reset to ready state so app continues
+      this.setStatus({ state: "ready", ready: true });
+    }
+  }
+
   sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }

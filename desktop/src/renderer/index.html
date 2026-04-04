@@ -17,6 +17,17 @@
             --danger: #b91c1c;
         }
 
+        [data-theme="dark"] {
+            --bg: #141414;
+            --panel: #242424;
+            --ink: #e0e0e0;
+            --subtle: #a8a8a8;
+            --accent: #39a499;
+            --accent-soft: #1a3a36;
+            --line: #333333;
+            --danger: #ff5252;
+        }
+
         * {
             box-sizing: border-box;
         }
@@ -90,6 +101,10 @@
             background: #f8fbfd;
         }
 
+        [data-theme="dark"] .controls {
+            background: #1a1a1a;
+        }
+
         .control {
             display: flex;
             flex-direction: column;
@@ -117,6 +132,26 @@
             background: white;
             color: var(--ink);
             font-weight: 600;
+            transition: background-color 150ms, border-color 150ms;
+        }
+
+        button:hover {
+            background-color: #f0f0f0;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        [data-theme="dark"] button {
+            background: #333333;
+            color: #e0e0e0;
+            border-color: #444444;
+        }
+
+        [data-theme="dark"] button:hover:not(:disabled) {
+            background: #444444;
         }
 
         button.primary {
@@ -125,10 +160,29 @@
             color: #fff;
         }
 
+        [data-theme="dark"] button.primary {
+            background: #2d8a81;
+            border-color: #3a9989;
+        }
+
+        [data-theme="dark"] button.primary:hover:not(:disabled) {
+            background: #39a499;
+        }
+
         button.toggle-on {
             border-color: var(--danger);
             background: #fee2e2;
             color: var(--danger);
+        }
+
+        [data-theme="dark"] button.toggle-on {
+            background: #3a2222;
+            color: #ff5252;
+            border-color: #552222;
+        }
+
+        [data-theme="dark"] button.toggle-on:hover:not(:disabled) {
+            background: #4a2222;
         }
 
         .canvas-wrap {
@@ -141,6 +195,16 @@
                 linear-gradient(-45deg, #edf2f7 25%, transparent 25%),
                 linear-gradient(45deg, transparent 75%, #edf2f7 75%),
                 linear-gradient(-45deg, transparent 75%, #edf2f7 75%);
+            background-size: 16px 16px;
+            background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+        }
+
+        [data-theme="dark"] .canvas-wrap {
+            background:
+                linear-gradient(45deg, #2a2a2a 25%, transparent 25%),
+                linear-gradient(-45deg, #2a2a2a 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, #2a2a2a 75%),
+                linear-gradient(-45deg, transparent 75%, #2a2a2a 75%);
             background-size: 16px 16px;
             background-position: 0 0, 0 8px, 8px -8px, -8px 0;
         }
@@ -168,9 +232,19 @@
             padding: 16px;
         }
 
+        [data-theme="dark"] .drop-zone {
+            border-color: #555555;
+            background: rgba(36, 36, 36, 0.9);
+            color: #a8a8a8;
+        }
+
         .drop-zone.active {
             border-color: var(--accent);
             color: var(--accent);
+        }
+
+        [data-theme="dark"] .drop-zone.active {
+            border-color: #39a499;
         }
 
         .status-row {
@@ -197,6 +271,10 @@
             overflow: hidden;
         }
 
+        [data-theme="dark"] .progress-track {
+            background: #333333;
+        }
+
         .progress-bar {
             height: 100%;
             width: 0%;
@@ -214,6 +292,12 @@
             font-size: 12px;
         }
 
+        [data-theme="dark"] .error-note {
+            border-color: #552222;
+            background: #3a2222;
+            color: #ff6b6b;
+        }
+
         .result-area {
             flex: 1;
             overflow: auto;
@@ -222,6 +306,10 @@
             align-items: center;
             justify-content: center;
             background: #fbfcfd;
+        }
+
+        [data-theme="dark"] .result-area {
+            background: #1a1a1a;
         }
 
         .output-controls {
@@ -238,6 +326,12 @@
             background: #fff;
             color: var(--ink);
             font-weight: 600;
+        }
+
+        [data-theme="dark"] .output-controls select {
+            background: #333333;
+            color: #e0e0e0;
+            border-color: #444444;
         }
 
         .output-zoom-controls {
@@ -269,6 +363,10 @@
             align-items: center;
             justify-content: space-between;
             gap: 10px;
+        }
+
+        [data-theme="dark"] .result-state {
+            background: #1a1a1a;
         }
 
         .result-area img {
@@ -305,6 +403,43 @@
                 grid-template-columns: 1fr;
             }
         }
+
+        .update-toast {
+            position: fixed;
+            right: 16px;
+            bottom: 16px;
+            max-width: 360px;
+            padding: 12px;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            background: var(--panel);
+            box-shadow: 0 12px 28px rgba(16, 26, 42, 0.18);
+            display: none;
+            z-index: 1000;
+        }
+
+        .update-toast.show {
+            display: block;
+        }
+
+        .update-toast-text {
+            margin: 0;
+            font-size: 13px;
+            color: var(--ink);
+        }
+
+        .update-toast-meta {
+            margin-top: 6px;
+            font-size: 12px;
+            color: var(--subtle);
+        }
+
+        .update-toast-actions {
+            margin-top: 10px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
     </style>
 </head>
 
@@ -316,7 +451,13 @@
                     <h1 class="panel-title">Mask Watermark</h1>
                     <p class="panel-subtitle">Drop image, brush over watermark, then remove</p>
                 </div>
-                <div id="backendPill" class="pill">Backend: unknown</div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <button id="themeToggleBtn" type="button" title="Toggle dark/light mode"
+                        style="min-width: auto; padding: 6px 10px;">
+                        <span id="themeToggleIcon">🌙</span>
+                    </button>
+                    <div id="backendPill" class="pill">Backend: unknown</div>
+                </div>
             </header>
 
             <div class="controls">
@@ -400,6 +541,14 @@
             </div>
         </section>
     </div>
+    <aside id="updateToast" class="update-toast" aria-live="polite" aria-atomic="true">
+        <p id="updateToastText" class="update-toast-text">A new update is available. Restart to install?</p>
+        <div id="updateToastMeta" class="update-toast-meta"></div>
+        <div class="update-toast-actions">
+            <button id="updateLaterBtn" type="button">Later</button>
+            <button id="updateYesBtn" class="primary" type="button">Yes</button>
+        </div>
+    </aside>
     <script src="./renderer.js"></script>
 </body>
 

@@ -18,6 +18,11 @@ const statusText = document.getElementById("statusText");
 const fileText = document.getElementById("fileText");
 const progressBar = document.getElementById("progressBar");
 const errorNote = document.getElementById("errorNote");
+const updateToast = document.getElementById("updateToast");
+const updateToastText = document.getElementById("updateToastText");
+const updateToastMeta = document.getElementById("updateToastMeta");
+const updateYesBtn = document.getElementById("updateYesBtn");
+const updateLaterBtn = document.getElementById("updateLaterBtn");
 
 const brushSizeInput = document.getElementById("brushSize");
 const brushSizeLabel = document.getElementById("brushSizeLabel");
@@ -53,6 +58,53 @@ let currentJobStartedAt = null;
 let lastProcessingSeconds = null;
 let selectedDevice = "cpu";
 let outputZoom = 1;
+let updatePromptVisible = false;
+let updateInstallVersion = null;
+let updateInstallAccepted = false;
+let currentTheme = "light";
+
+const THEME_KEY = "pwr.theme";
+const THEME_LIGHT = "light";
+const THEME_DARK = "dark";
+
+function applyTheme(theme) {
+  const isDark = theme === THEME_DARK;
+  document.documentElement.dataset.theme = isDark ? THEME_DARK : THEME_LIGHT;
+  currentTheme = isDark ? THEME_DARK : THEME_LIGHT;
+  
+  const icon = document.getElementById("themeToggleIcon");
+  if (icon) {
+    icon.textContent = isDark ? "\u2600\uFE0F" : "\ud83c\udf19";
+  }
+  
+  localStorage.setItem(THEME_KEY, currentTheme);
+}
+
+function loadTheme() {
+  const saved = localStorage.getItem(THEME_KEY) || THEME_LIGHT;
+  applyTheme(saved);
+}
+
+function hideUpdateToast() {
+  if (!updateToast) {
+    return;
+  }
+  updateToast.classList.remove("show");
+  updatePromptVisible = false;
+}
+
+function showUpdateToast(message, meta = "") {
+  if (!updateToast || !updateToastText || !updateYesBtn || !updateLaterBtn) {
+    return;
+  }
+
+  updateToastText.textContent = message;
+  if (updateToastMeta) {
+    updateToastMeta.textContent = meta;
+  }
+  updateToast.classList.add("show");
+  updatePromptVisible = true;
+}
 
 function humanStage(stage) {
   const map = {
@@ -204,9 +256,18 @@ function setOutputState(state) {
 
 function setBackendStatus(status) {
   backendReady = Boolean(status.ready);
-  backendPill.textContent = `Backend: ${status.state}`;
-  backendPill.style.background = status.ready ? "#d6f6f1" : "#fef3c7";
-  backendPill.style.color = status.ready ? "#147d75" : "#92400e";
+  
+  // Show special message during model warmup
+  if (status.state === "warming") {
+    backendPill.textContent = "Warming up AI...";
+    backendPill.style.background = "#fef3c7";
+    backendPill.style.color = "#92400e";
+  } else {
+    backendPill.textContent = `Backend: ${status.state}`;
+    backendPill.style.background = status.ready ? "#d6f6f1" : "#fef3c7";
+    backendPill.style.color = status.ready ? "#147d75" : "#92400e";
+  }
+  
   syncUi();
 }
 
@@ -715,7 +776,93 @@ window.backend.onStatusChanged((status) => {
   }
 });
 
+if (window.updater) {
+  window.updater.onUpdateAvailable((payload) => {
+    updateInstallVersion = payload?.version || null;
+    updateInstallAccepted = false;
+    const meta = updateInstallVersion ? `Version ${updateInstallVersion}` : "";
+    showUpdateToast("A new update is available. Restart to install?", meta);
+    if (updateToastMeta) {
+      updateToastMeta.textContent = meta;
+    }
+  });
+
+  window.updater.onDownloadProgress((payload) => {
+    if (!updatePromptVisible || !updateInstallAccepted || !updateToastMeta) {
+      return;
+    }
+    const percent = Math.max(0, Math.min(100, Number(payload?.percent || 0)));
+    updateToastMeta.textContent = `Downloading update... ${percent.toFixed(0)}%`;
+  });
+
+  window.updater.onUpdateDownloaded(() => {
+    if (updateToastMeta && updateInstallAccepted) {
+      updateToastMeta.textContent = "Installing update and restarting...";
+    }
+  });
+
+  window.updater.onError((payload) => {
+    if (!updateToastMeta) {
+      return;
+    }
+    const message = payload?.message ? String(payload.message) : "Update check failed";
+    updateToastMeta.textContent = message;
+  });
+}
+
+if (updateYesBtn) {
+  updateYesBtn.addEventListener("click", async () => {
+    if (!window.updater) {
+      return;
+    }
+    updateInstallAccepted = true;
+    if (updateToastMeta) {
+      updateToastMeta.textContent = "Downloading update in background...";
+    }
+    updateYesBtn.disabled = true;
+    updateLaterBtn.disabled = true;
+    try {
+      await window.updater.acceptInstall();
+    } catch (error) {
+      updateInstallAccepted = false;
+      updateYesBtn.disabled = false;
+      updateLaterBtn.disabled = false;
+      if (updateToastMeta) {
+        updateToastMeta.textContent = `Update failed: ${error?.message || error}`;
+      }
+    }
+  });
+}
+
+if (updateLaterBtn) {
+  updateLaterBtn.addEventListener("click", async () => {
+    if (window.updater) {
+      try {
+        await window.updater.deferInstall();
+      } catch {
+        // Ignore defer errors and still hide the non-critical toast.
+      }
+    }
+    hideUpdateToast();
+    if (updateYesBtn) {
+      updateYesBtn.disabled = false;
+    }
+    if (updateLaterBtn) {
+      updateLaterBtn.disabled = false;
+    }
+  });
+}
+
+const themeToggleBtn = document.getElementById("themeToggleBtn");
+if (themeToggleBtn) {
+  themeToggleBtn.addEventListener("click", () => {
+    const nextTheme = currentTheme === THEME_DARK ? THEME_LIGHT : THEME_DARK;
+    applyTheme(nextTheme);
+  });
+}
+
 (async function init() {
+  loadTheme();
   resizeCanvas();
   setOutputState("no-output");
   syncUi();

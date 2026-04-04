@@ -15,7 +15,8 @@
     "dist:win": "npm run prepare:package && electron-builder --win nsis"
   },
   "dependencies": {
-    "cross-env": "^7.0.3"
+    "cross-env": "^7.0.3",
+    "electron-updater": "^6.6.2"
   },
   "devDependencies": {
     "electron": "^36.2.1",
@@ -58,6 +59,11 @@
         "nsis"
       ],
       "artifactName": "${productName}-${version}-setup.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "SadmanMahi67",
+      "repo": "Photo-Watermark-Remover"
     },
     "nsis": {
       "oneClick": true,

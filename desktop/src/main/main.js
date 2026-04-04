@@ -3,10 +3,82 @@ const fs = require("node:fs");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const { BackendManager } = require("./backendManager");
 
 let mainWindow = null;
 const backend = new BackendManager({ host: "127.0.0.1", port: 8000 });
+let updateAvailableInfo = null;
+let updateDownloadedInfo = null;
+let updateDownloadInFlight = false;
+let updateInstallAccepted = false;
+
+function emitUpdaterEvent(channel, payload = {}) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
+function runUpdateDownload() {
+  if (!app.isPackaged || !updateAvailableInfo || updateDownloadInFlight || updateDownloadedInfo) {
+    return;
+  }
+
+  updateDownloadInFlight = true;
+  autoUpdater.downloadUpdate().catch((error) => {
+    console.error("[updater:error]", error?.message || error);
+    emitUpdaterEvent("updater:error", { message: String(error?.message || error) });
+  }).finally(() => {
+    updateDownloadInFlight = false;
+  });
+}
+
+function configureAutoUpdater() {
+  if (!app.isPackaged) {
+    return;
+  }
+
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on("error", (error) => {
+    console.error("[updater:error]", error?.message || error);
+    emitUpdaterEvent("updater:error", { message: String(error?.message || error) });
+  });
+
+  autoUpdater.on("update-available", (info) => {
+    updateAvailableInfo = info;
+    emitUpdaterEvent("updater:update-available", {
+      version: info?.version || null,
+      releaseName: info?.releaseName || null,
+    });
+  });
+
+  autoUpdater.on("download-progress", (progress) => {
+    emitUpdaterEvent("updater:download-progress", {
+      percent: Number(progress?.percent || 0),
+    });
+  });
+
+  autoUpdater.on("update-downloaded", (info) => {
+    updateDownloadedInfo = info;
+    emitUpdaterEvent("updater:update-downloaded", {
+      version: info?.version || null,
+      releaseName: info?.releaseName || null,
+    });
+
+    if (updateInstallAccepted) {
+      autoUpdater.quitAndInstall();
+    }
+  });
+
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((error) => {
+      console.error("[updater:error]", error?.message || error);
+      emitUpdaterEvent("updater:error", { message: String(error?.message || error) });
+    });
+  }, 1000);
+}
 
 function resolveOutputImagePath(sourcePath) {
   if (!sourcePath || !fs.existsSync(sourcePath)) {
@@ -96,7 +168,13 @@ async function bootBackendOrShowError() {
 app.whenReady().then(async () => {
   createWindow();
   wireBackendEvents();
+  configureAutoUpdater();
   await bootBackendOrShowError();
+
+  // Trigger model warmup after backend is ready
+  backend.warmup().catch((err) => {
+    console.error("[warmup] background error:", err?.message || err);
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -193,6 +271,23 @@ ipcMain.handle("backend:open-output-folder", async (_event, targetPath) => {
 
   shell.showItemInFolder(existingPath);
   return true;
+});
+
+ipcMain.handle("updater:accept-install", async () => {
+  updateInstallAccepted = true;
+
+  if (updateDownloadedInfo) {
+    autoUpdater.quitAndInstall();
+    return { state: "installing" };
+  }
+
+  runUpdateDownload();
+  return { state: updateDownloadInFlight ? "downloading" : "idle" };
+});
+
+ipcMain.handle("updater:defer-install", async () => {
+  updateInstallAccepted = false;
+  return { state: "deferred" };
 });
 
 app.on("before-quit", async (event) => {
