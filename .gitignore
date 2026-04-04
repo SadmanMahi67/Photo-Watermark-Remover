@@ -1,0 +1,10 @@
+.venv/
+.dist/
+node_modules/
+models/
+backend/tmp/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log

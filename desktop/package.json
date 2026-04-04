@@ -1,0 +1,17 @@
+{
+  "name": "photo-watermark-remover-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline desktop app shell for local watermark removal",
+  "main": "src/main/main.js",
+  "scripts": {
+    "prepare:models": "node ./scripts/prepare_models.js",
+    "prestart": "npm run prepare:models",
+    "start": "electron .",
+    "start:dev": "cross-env NODE_ENV=development electron ."
+  },
+  "dependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^36.2.1"
+  }
+}
