@@ -10,6 +10,7 @@ const brushSizeInput = document.getElementById("brushSize");
 const brushSizeLabel = document.getElementById("brushSizeLabel");
 const zoomSlider = document.getElementById("zoomSlider");
 const zoomLabel = document.getElementById("zoomLabel");
+const openImageBtn = document.getElementById("openImageBtn");
 const eraserBtn = document.getElementById("eraserBtn");
 const clearMaskBtn = document.getElementById("clearMaskBtn");
 const resetViewBtn = document.getElementById("resetViewBtn");
@@ -28,6 +29,8 @@ const jobState = {
   output: null,
   error: null,
 };
+
+let backendReady = false;
 
 const viewState = {
   image: null,
@@ -61,12 +64,22 @@ function syncUi() {
   }
 
   fileText.textContent = jobState.imageSource || "No image selected";
+
+  const hasImage = Boolean(jobState.imageSource);
+  const running = jobState.status === "processing";
+  removeBtn.disabled = !hasImage || running || !backendReady;
+  openImageBtn.disabled = running;
+  eraserBtn.disabled = running || !hasImage;
+  clearMaskBtn.disabled = running || !hasImage;
+  resetViewBtn.disabled = running || !hasImage;
 }
 
 function setBackendStatus(status) {
+  backendReady = Boolean(status.ready);
   backendPill.textContent = `Backend: ${status.state}`;
   backendPill.style.background = status.ready ? "#d6f6f1" : "#fef3c7";
   backendPill.style.color = status.ready ? "#147d75" : "#92400e";
+  syncUi();
 }
 
 function fitImageToView() {
@@ -226,6 +239,19 @@ async function removeWatermark() {
   }
 }
 
+async function pickAndLoadImage() {
+  try {
+    const imagePath = await window.backend.pickImage();
+    if (!imagePath) {
+      return;
+    }
+    await loadImage(imagePath);
+  } catch (error) {
+    jobState.error = `Failed to open image: ${error?.message || error}`;
+    syncUi();
+  }
+}
+
 canvas.addEventListener("pointerdown", (event) => {
   if (!viewState.image) {
     return;
@@ -361,6 +387,10 @@ clearMaskBtn.addEventListener("click", () => {
 resetViewBtn.addEventListener("click", () => {
   fitImageToView();
   render();
+});
+
+openImageBtn.addEventListener("click", async () => {
+  await pickAndLoadImage();
 });
 
 removeBtn.addEventListener("click", async () => {

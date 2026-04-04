@@ -75,6 +75,20 @@ app.whenReady().then(async () => {
 
 ipcMain.handle("backend:get-status", async () => backend.getStatus());
 ipcMain.handle("backend:restart", async () => backend.restart());
+ipcMain.handle("backend:pick-image", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Select Image",
+    properties: ["openFile"],
+    filters: [
+      { name: "Images", extensions: ["png", "jpg", "jpeg"] },
+    ],
+  });
+
+  if (result.canceled || !result.filePaths[0]) {
+    return null;
+  }
+  return result.filePaths[0];
+});
 ipcMain.handle("backend:start-inpaint", async (_event, payload) => backend.startInpaint(payload));
 ipcMain.handle("backend:get-job", async (_event, jobId) => backend.getJob(jobId));
 ipcMain.handle("backend:cancel-job", async (_event, jobId) => backend.cancelJob(jobId));
