@@ -40,16 +40,24 @@ class BackendManager extends EventEmitter {
   }
 
   getPythonExecutable() {
-    if (process.env.BACKEND_PYTHON_PATH) {
-      return process.env.BACKEND_PYTHON_PATH;
-    }
+    const candidates = [];
+
     if (!app.isPackaged) {
-      return path.resolve(app.getAppPath(), "..", ".venv", "Scripts", "python.exe");
+      // Prefer the workspace venv in development, regardless of how Electron resolves app path.
+      candidates.push(path.resolve(process.cwd(), "..", ".venv", "Scripts", "python.exe"));
+      candidates.push(path.resolve(app.getAppPath(), "..", ".venv", "Scripts", "python.exe"));
+      candidates.push(path.resolve(__dirname, "..", "..", "..", ".venv", "Scripts", "python.exe"));
     }
-    const candidates = [
-      path.join(process.resourcesPath, "python", "Scripts", "python.exe"),
-      path.join(process.resourcesPath, "python", "python.exe"),
-    ];
+
+    if (process.env.BACKEND_PYTHON_PATH) {
+      candidates.push(path.resolve(process.env.BACKEND_PYTHON_PATH));
+    }
+
+    if (app.isPackaged) {
+      candidates.push(path.join(process.resourcesPath, "python", "Scripts", "python.exe"));
+      candidates.push(path.join(process.resourcesPath, "python", "python.exe"));
+    }
+
     const found = candidates.find((candidate) => fs.existsSync(candidate));
     return found || candidates[0];
   }
@@ -133,6 +141,11 @@ class BackendManager extends EventEmitter {
       this.setStatus({ state: "failed", ready: false, lastError: err });
       throw new Error(err);
     }
+
+    this.emit("log", {
+      level: "info",
+      message: `Backend python executable: ${pythonPath}`,
+    });
 
     const args = [
       "-m",
@@ -411,14 +424,23 @@ class BackendManager extends EventEmitter {
   async detectDevices() {
     const pythonPath = this.getPythonExecutable();
     if (!fs.existsSync(pythonPath)) {
+      this.emit("log", {
+        level: "error",
+        message: `Device detection python not found: ${pythonPath}`,
+      });
       return [{ id: "cpu", label: "CPU (slower)" }];
     }
 
     const snippet = [
       "import json",
+      "import sys",
       "devices = [{'id': 'cpu', 'label': 'CPU (slower)'}]",
+      "runtime = {'python': sys.executable, 'torch': None, 'cuda': None, 'cuda_available': False}",
       "try:",
       "    import torch",
+      "    runtime['torch'] = torch.__version__",
+      "    runtime['cuda'] = torch.version.cuda",
+      "    runtime['cuda_available'] = bool(torch.cuda.is_available())",
       "    if torch.cuda.is_available():",
       "        count = torch.cuda.device_count()",
       "        if count > 0:",
@@ -427,10 +449,10 @@ class BackendManager extends EventEmitter {
       "            devices.insert(0, {'id': 'cuda', 'label': f'{name}{suffix} (CUDA)'})",
       "    if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():",
       "        devices.insert(0, {'id': 'mps', 'label': 'Apple Silicon GPU (MPS)'})",
-      "except Exception:",
-      "    pass",
-      "print(json.dumps({'devices': devices}))",
-    ].join("\\n");
+      "except Exception as exc:",
+      "    runtime['error'] = str(exc)",
+      "print(json.dumps({'devices': devices, 'runtime': runtime}))",
+    ].join("\n");
 
     return new Promise((resolve) => {
       const proc = spawn(pythonPath, ["-c", snippet], {
@@ -440,19 +462,38 @@ class BackendManager extends EventEmitter {
       });
 
       let out = "";
+      let err = "";
       proc.stdout.on("data", (chunk) => {
         out += chunk.toString();
       });
+      proc.stderr.on("data", (chunk) => {
+        err += chunk.toString();
+      });
 
-      proc.on("close", () => {
+      proc.on("close", (code) => {
+        if (err.trim()) {
+          this.emit("log", {
+            level: "error",
+            message: `Device detection stderr: ${err.trim()}`,
+          });
+        }
+
         try {
           const parsed = JSON.parse(out.trim());
+          const runtime = parsed.runtime || {};
+          this.emit("log", {
+            level: "info",
+            message: `Device detection using ${runtime.python || pythonPath} (torch=${runtime.torch || "n/a"}, cuda=${runtime.cuda || "n/a"}, cuda_available=${runtime.cuda_available ? "true" : "false"})`,
+          });
           if (Array.isArray(parsed.devices) && parsed.devices.length > 0) {
             resolve(parsed.devices);
             return;
           }
         } catch {
-          // ignore and fallback
+          this.emit("log", {
+            level: "error",
+            message: `Device detection parse failure (exit=${code}): ${out.trim()}`,
+          });
         }
         resolve([{ id: "cpu", label: "CPU (slower)" }]);
       });

@@ -61,6 +61,10 @@ function wireBackendEvents() {
   });
 
   backend.on("log", (entry) => {
+    const level = entry?.level || "info";
+    const message = entry?.message || "";
+    // Print backend manager diagnostics into the Electron terminal for debugging.
+    console.log(`[backend:${level}] ${message}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("backend:log", entry);
     }
