@@ -3,7 +3,14 @@ const canvasWrap = document.getElementById("canvasWrap");
 const dropZone = document.getElementById("dropZone");
 const resultArea = document.getElementById("resultArea");
 const outputStateText = document.getElementById("outputStateText");
+const processingTimeText = document.getElementById("processingTimeText");
+const deviceSelect = document.getElementById("deviceSelect");
+const deviceNote = document.getElementById("deviceNote");
 const outputFormatSelect = document.getElementById("outputFormatSelect");
+const outputZoomOutBtn = document.getElementById("outputZoomOutBtn");
+const outputZoomInBtn = document.getElementById("outputZoomInBtn");
+const outputZoomResetBtn = document.getElementById("outputZoomResetBtn");
+const outputZoomLabel = document.getElementById("outputZoomLabel");
 const saveOutputBtn = document.getElementById("saveOutputBtn");
 const openFolderBtn = document.getElementById("openFolderBtn");
 const backendPill = document.getElementById("backendPill");
@@ -42,6 +49,10 @@ const jobState = {
 let backendReady = false;
 let outputPanelState = "no-output";
 let currentJobId = null;
+let currentJobStartedAt = null;
+let lastProcessingSeconds = null;
+let selectedDevice = "cpu";
+let outputZoom = 1;
 
 function humanStage(stage) {
   const map = {
@@ -119,6 +130,7 @@ function syncUi() {
   saveOutputBtn.disabled = !hasOutput || running;
   openFolderBtn.disabled = !hasOutput || running;
   outputFormatSelect.disabled = running;
+  deviceSelect.disabled = running;
 
   if (jobState.error) {
     errorNote.style.display = "block";
@@ -126,6 +138,45 @@ function syncUi() {
   } else {
     errorNote.style.display = "none";
     errorNote.textContent = "";
+  }
+
+  processingTimeText.textContent = lastProcessingSeconds !== null
+    ? `Processed in ${lastProcessingSeconds.toFixed(1)}s`
+    : "";
+  outputZoomLabel.textContent = `${Math.round(outputZoom * 100)}%`;
+}
+
+function setOutputZoom(next) {
+  outputZoom = Math.min(6, Math.max(0.25, next));
+  const image = resultArea.querySelector("img");
+  if (image) {
+    image.style.transform = `scale(${outputZoom})`;
+  }
+  syncUi();
+}
+
+function populateDevices(devices) {
+  const list = Array.isArray(devices) && devices.length > 0
+    ? devices
+    : [{ id: "cpu", label: "CPU (slower)" }];
+
+  deviceSelect.innerHTML = "";
+  for (const device of list) {
+    const option = document.createElement("option");
+    option.value = device.id;
+    option.textContent = device.label;
+    deviceSelect.appendChild(option);
+  }
+
+  const preferred = list.find((d) => d.id !== "cpu")?.id || "cpu";
+  selectedDevice = list.some((d) => d.id === preferred) ? preferred : list[0].id;
+  deviceSelect.value = selectedDevice;
+
+  const hasGpu = list.some((d) => d.id === "cuda" || d.id === "mps");
+  if (deviceNote) {
+    deviceNote.textContent = hasGpu
+      ? "GPU detected. You can switch to CPU if needed."
+      : "No GPU backend detected. Falling back to CPU.";
   }
 }
 
@@ -280,28 +331,8 @@ function paintOutput(path) {
   }
   outputPanelState = "output-loaded";
   const outputSrc = fileUrlFromPath(path);
-  const inputSrc = jobState.imageSource ? fileUrlFromPath(jobState.imageSource) : outputSrc;
-  const token = Date.now();
-  resultArea.innerHTML = `
-    <div class="compare-wrap">
-      <div class="compare-stage">
-        <img class="compare-base" src="${inputSrc}?t=${token}" alt="Before image" />
-        <img id="compareOverlay" class="compare-overlay" src="${outputSrc}?t=${token}" alt="After image" />
-      </div>
-      <input id="compareSlider" class="compare-slider" type="range" min="0" max="100" step="1" value="50" />
-      <div class="compare-labels">
-        <span>Before</span>
-        <span>After</span>
-      </div>
-    </div>
-  `;
-
-  const slider = document.getElementById("compareSlider");
-  const overlay = document.getElementById("compareOverlay");
-  slider.addEventListener("input", () => {
-    const value = Number(slider.value);
-    overlay.style.clipPath = `inset(0 ${100 - value}% 0 0)`;
-  });
+  resultArea.innerHTML = `<img src="${outputSrc}?t=${Date.now()}" alt="Cleaned output" />`;
+  setOutputZoom(1);
 
   outputStateText.textContent = "Output state: output loaded";
 }
@@ -314,6 +345,8 @@ function clearJobState() {
   jobState.output = null;
   jobState.error = null;
   currentJobId = null;
+  currentJobStartedAt = null;
+  lastProcessingSeconds = null;
 
   viewState.image = null;
   viewState.zoom = 1;
@@ -349,6 +382,8 @@ async function removeWatermark() {
     jobState.error = null;
     jobState.status = "processing";
     jobState.progress = { stage: "exporting_mask", percent: 15, error: null };
+    currentJobStartedAt = performance.now();
+    lastProcessingSeconds = null;
     setOutputState("processing");
     syncUi();
 
@@ -361,6 +396,7 @@ async function removeWatermark() {
     const started = await window.backend.startInpaint({
       image_path: jobState.imageSource,
       mask_path: jobState.maskSource,
+      device: selectedDevice,
     });
 
     currentJobId = started.job_id;
@@ -371,12 +407,17 @@ async function removeWatermark() {
       jobState.output = detail.output_path || null;
       if (detail.status === "completed") {
         currentJobId = null;
+        if (currentJobStartedAt !== null) {
+          lastProcessingSeconds = (performance.now() - currentJobStartedAt) / 1000;
+        }
+        currentJobStartedAt = null;
         paintOutput(jobState.output);
         syncUi();
         return;
       }
       if (detail.status === "cancelled") {
         currentJobId = null;
+        currentJobStartedAt = null;
         jobState.status = "cancelled";
         jobState.error = null;
         jobState.progress = { stage: "cancelled", percent: 0, error: null };
@@ -386,6 +427,7 @@ async function removeWatermark() {
       }
       if (detail.status === "failed") {
         currentJobId = null;
+        currentJobStartedAt = null;
         throw new Error(detail.progress?.error || `Job ${detail.status}`);
       }
       syncUi();
@@ -393,6 +435,7 @@ async function removeWatermark() {
     }
   } catch (error) {
     currentJobId = null;
+    currentJobStartedAt = null;
     jobState.status = "error";
     jobState.error = error?.message || String(error);
     setOutputState("error");
@@ -638,6 +681,32 @@ openFolderBtn.addEventListener("click", async () => {
   await openOutputFolder();
 });
 
+deviceSelect.addEventListener("change", () => {
+  selectedDevice = deviceSelect.value || "cpu";
+});
+
+outputZoomInBtn.addEventListener("click", () => {
+  setOutputZoom(outputZoom * 1.2);
+});
+
+outputZoomOutBtn.addEventListener("click", () => {
+  setOutputZoom(outputZoom / 1.2);
+});
+
+outputZoomResetBtn.addEventListener("click", () => {
+  setOutputZoom(1);
+});
+
+resultArea.addEventListener("wheel", (event) => {
+  const image = resultArea.querySelector("img");
+  if (!image) {
+    return;
+  }
+  event.preventDefault();
+  const delta = event.deltaY < 0 ? 1.1 : 0.9;
+  setOutputZoom(outputZoom * delta);
+}, { passive: false });
+
 window.backend.onStatusChanged((status) => {
   setBackendStatus(status);
   if (status.lastError && jobState.status !== "processing") {
@@ -654,7 +723,10 @@ window.backend.onStatusChanged((status) => {
   try {
     const status = await window.backend.getStatus();
     setBackendStatus(status);
+    const detectedDevices = await window.backend.getDevices();
+    populateDevices(detectedDevices);
   } catch (error) {
+    populateDevices([{ id: "cpu", label: "CPU (slower)" }]);
     jobState.error = `Failed to query backend: ${error?.message || error}`;
     syncUi();
   }

@@ -31,6 +31,7 @@ class InpaintRequest(BaseModel):
     image_path: str
     mask_path: str
     output_path: Optional[str] = None
+    device: Literal["cpu", "cuda", "mps"] = "cpu"
 
 
 class InpaintResponse(BaseModel):
@@ -44,6 +45,7 @@ class JobStatus(BaseModel):
     image_path: str
     mask_path: str
     output_path: Optional[str]
+    device: Literal["cpu", "cuda", "mps"]
     progress: ProgressEvent
 
 
@@ -58,6 +60,7 @@ class Job:
     image_path: Path
     mask_path: Path
     output_path: Optional[Path]
+    device: Literal["cpu", "cuda", "mps"] = "cpu"
     status: StatusLiteral = "queued"
     progress: ProgressEvent = field(default_factory=lambda: ProgressEvent(stage="queued", percent=0, error=None))
     events: "Queue[ProgressEvent]" = field(default_factory=Queue)
@@ -93,14 +96,19 @@ def model_dir_path() -> Path:
     return model_dir
 
 
-def iopaint_run(image_path: Path, mask_path: Path, output_path: Path) -> subprocess.Popen[str]:
+def iopaint_run(
+    image_path: Path,
+    mask_path: Path,
+    output_path: Path,
+    device: Literal["cpu", "cuda", "mps"],
+) -> subprocess.Popen[str]:
     cmd = [
         sys.executable,
         "-m",
         "iopaint",
         "run",
         "--model=lama",
-        f"--device={os.getenv('IOPAINT_DEVICE', 'cpu')}",
+        f"--device={device}",
         f"--image={image_path}",
         f"--mask={mask_path}",
         f"--output={output_path}",
@@ -120,6 +128,32 @@ def iopaint_run(image_path: Path, mask_path: Path, output_path: Path) -> subproc
     )
 
 
+def resolve_generated_output_path(target: Path, source_image: Path) -> Optional[Path]:
+    if target.is_file():
+        return target
+
+    if target.is_dir():
+        preferred_names = [
+            source_image.name,
+            f"{source_image.stem}.png",
+            f"{source_image.stem}.jpg",
+            f"{source_image.stem}.jpeg",
+        ]
+        for name in preferred_names:
+            candidate = target / name
+            if candidate.is_file():
+                return candidate
+
+        image_files = [
+            p for p in target.iterdir()
+            if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}
+        ]
+        if image_files:
+            return sorted(image_files, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+
+    return None
+
+
 def run_job(job: Job) -> None:
     try:
         job.status = "running"
@@ -136,7 +170,7 @@ def run_job(job: Job) -> None:
         push_progress(job, stage="loading_model", percent=15)
 
         push_progress(job, stage="inpainting", percent=30)
-        proc = iopaint_run(job.image_path, job.mask_path, output_path)
+        proc = iopaint_run(job.image_path, job.mask_path, output_path, job.device)
         job.process = proc
 
         percent_re = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
@@ -153,8 +187,10 @@ def run_job(job: Job) -> None:
             raise RuntimeError(f"iopaint run failed with exit code {code}")
 
         push_progress(job, stage="writing_output", percent=98)
-        if not output_path.exists():
+        resolved_output = resolve_generated_output_path(output_path, job.image_path)
+        if resolved_output is None:
             raise RuntimeError("processing finished but output file was not created")
+        job.output_path = resolved_output
 
         job.status = "completed"
         push_progress(job, stage="completed", percent=100)
@@ -194,7 +230,7 @@ def run_warmup() -> None:
         mask.save(mask_path)
         set_warmup("model_loading", 25)
 
-        proc = iopaint_run(image_path, mask_path, output_path)
+        proc = iopaint_run(image_path, mask_path, output_path, "cpu")
         percent_re = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
         if proc.stdout is not None:
             for line in proc.stdout:
@@ -256,7 +292,7 @@ def start_inpaint(req: InpaintRequest) -> InpaintResponse:
     output = Path(req.output_path).expanduser().resolve() if req.output_path else None
 
     job_id = str(uuid.uuid4())
-    job = Job(job_id=job_id, image_path=image, mask_path=mask, output_path=output)
+    job = Job(job_id=job_id, image_path=image, mask_path=mask, output_path=output, device=req.device)
     with jobs_lock:
         jobs[job_id] = job
 
@@ -279,6 +315,7 @@ def get_job(job_id: str) -> JobStatus:
         image_path=str(job.image_path),
         mask_path=str(job.mask_path),
         output_path=str(job.output_path) if job.output_path else None,
+        device=job.device,
         progress=job.progress,
     )
 
@@ -302,6 +339,7 @@ def cancel_job(job_id: str) -> JobStatus:
         image_path=str(job.image_path),
         mask_path=str(job.mask_path),
         output_path=str(job.output_path) if job.output_path else None,
+        device=job.device,
         progress=job.progress,
     )
 

@@ -46,7 +46,12 @@ class BackendManager extends EventEmitter {
     if (!app.isPackaged) {
       return path.resolve(app.getAppPath(), "..", ".venv", "Scripts", "python.exe");
     }
-    return path.join(process.resourcesPath, "python", "python.exe");
+    const candidates = [
+      path.join(process.resourcesPath, "python", "Scripts", "python.exe"),
+      path.join(process.resourcesPath, "python", "python.exe"),
+    ];
+    const found = candidates.find((candidate) => fs.existsSync(candidate));
+    return found || candidates[0];
   }
 
   getBundledModelsDir() {
@@ -401,6 +406,57 @@ class BackendManager extends EventEmitter {
 
   async cancelJob(jobId) {
     return this.requestJson("POST", `/jobs/${jobId}/cancel`);
+  }
+
+  async detectDevices() {
+    const pythonPath = this.getPythonExecutable();
+    if (!fs.existsSync(pythonPath)) {
+      return [{ id: "cpu", label: "CPU (slower)" }];
+    }
+
+    const snippet = [
+      "import json",
+      "devices = [{'id': 'cpu', 'label': 'CPU (slower)'}]",
+      "try:",
+      "    import torch",
+      "    if torch.cuda.is_available():",
+      "        count = torch.cuda.device_count()",
+      "        if count > 0:",
+      "            name = torch.cuda.get_device_name(0)",
+      "            suffix = f' +{count-1} more' if count > 1 else ''",
+      "            devices.insert(0, {'id': 'cuda', 'label': f'{name}{suffix} (CUDA)'})",
+      "    if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():",
+      "        devices.insert(0, {'id': 'mps', 'label': 'Apple Silicon GPU (MPS)'})",
+      "except Exception:",
+      "    pass",
+      "print(json.dumps({'devices': devices}))",
+    ].join("\\n");
+
+    return new Promise((resolve) => {
+      const proc = spawn(pythonPath, ["-c", snippet], {
+        cwd: this.getBackendRoot(),
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let out = "";
+      proc.stdout.on("data", (chunk) => {
+        out += chunk.toString();
+      });
+
+      proc.on("close", () => {
+        try {
+          const parsed = JSON.parse(out.trim());
+          if (Array.isArray(parsed.devices) && parsed.devices.length > 0) {
+            resolve(parsed.devices);
+            return;
+          }
+        } catch {
+          // ignore and fallback
+        }
+        resolve([{ id: "cpu", label: "CPU (slower)" }]);
+      });
+    });
   }
 
   sleep(ms) {

@@ -240,46 +240,23 @@
             font-weight: 600;
         }
 
-        .compare-wrap {
-            width: min(100%, 840px);
-            display: grid;
-            gap: 12px;
-        }
-
-        .compare-stage {
-            position: relative;
-            border-radius: 12px;
-            overflow: hidden;
-            border: 1px solid var(--line);
-            background: #fff;
-        }
-
-        .compare-base,
-        .compare-overlay {
-            display: block;
-            width: 100%;
-            max-height: 62vh;
-            object-fit: contain;
-            background: #fff;
-        }
-
-        .compare-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            height: 100%;
-            clip-path: inset(0 50% 0 0);
-        }
-
-        .compare-slider {
-            width: 100%;
-        }
-
-        .compare-labels {
+        .output-zoom-controls {
             display: flex;
-            justify-content: space-between;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .output-zoom-controls button {
+            min-width: 34px;
+            padding: 7px 8px;
+        }
+
+        .zoom-level {
+            min-width: 52px;
+            text-align: center;
             color: var(--subtle);
             font-size: 12px;
+            font-weight: 600;
         }
 
         .result-state {
@@ -288,13 +265,32 @@
             color: var(--subtle);
             font-size: 13px;
             background: #f8fbfd;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
         }
 
         .result-area img {
             max-width: 100%;
-            max-height: 100%;
+            max-height: calc(100vh - 280px);
+            width: auto;
+            height: auto;
             border-radius: 10px;
             border: 1px solid var(--line);
+            transform-origin: center center;
+            transition: transform 100ms ease;
+        }
+
+        .processing-time {
+            color: var(--subtle);
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .device-note {
+            color: var(--subtle);
+            font-size: 11px;
         }
 
         .empty-note {
@@ -332,6 +328,14 @@
                 <label class="control">
                     Zoom <span id="zoomLabel">100%</span>
                     <input id="zoomSlider" type="range" min="25" max="400" step="5" value="100" />
+                </label>
+
+                <label class="control">
+                    Processing Device
+                    <select id="deviceSelect" aria-label="Processing device">
+                        <option value="cpu">CPU (slower)</option>
+                    </select>
+                    <span id="deviceNote" class="device-note"></span>
                 </label>
 
                 <div class="control">
@@ -377,6 +381,12 @@
                         <option value="png">PNG</option>
                         <option value="jpg">JPG</option>
                     </select>
+                    <div class="output-zoom-controls">
+                        <button id="outputZoomOutBtn" type="button">-</button>
+                        <span id="outputZoomLabel" class="zoom-level">100%</span>
+                        <button id="outputZoomInBtn" type="button">+</button>
+                        <button id="outputZoomResetBtn" type="button">Reset</button>
+                    </div>
                     <button id="saveOutputBtn" type="button">Save Output</button>
                     <button id="openFolderBtn" type="button">Open Folder</button>
                 </div>
@@ -384,7 +394,10 @@
             <div class="result-area" id="resultArea">
                 <div class="empty-note">Run removal to preview output.</div>
             </div>
-            <div id="outputStateText" class="result-state">Output state: no output</div>
+            <div class="result-state">
+                <span id="outputStateText">Output state: no output</span>
+                <span id="processingTimeText" class="processing-time"></span>
+            </div>
         </section>
     </div>
     <script src="./renderer.js"></script>

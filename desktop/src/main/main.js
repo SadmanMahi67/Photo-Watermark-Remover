@@ -8,6 +8,34 @@ const { BackendManager } = require("./backendManager");
 let mainWindow = null;
 const backend = new BackendManager({ host: "127.0.0.1", port: 8000 });
 
+function resolveOutputImagePath(sourcePath) {
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    return null;
+  }
+
+  const stat = fs.statSync(sourcePath);
+  if (stat.isFile()) {
+    return sourcePath;
+  }
+
+  if (!stat.isDirectory()) {
+    return null;
+  }
+
+  const imageFiles = fs.readdirSync(sourcePath)
+    .map((name) => path.join(sourcePath, name))
+    .filter((candidate) => {
+      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) {
+        return false;
+      }
+      const ext = path.extname(candidate).toLowerCase();
+      return [".png", ".jpg", ".jpeg"].includes(ext);
+    })
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+
+  return imageFiles[0] || null;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1100,
@@ -75,6 +103,7 @@ app.whenReady().then(async () => {
 
 ipcMain.handle("backend:get-status", async () => backend.getStatus());
 ipcMain.handle("backend:restart", async () => backend.restart());
+ipcMain.handle("backend:get-devices", async () => backend.detectDevices());
 ipcMain.handle("backend:pick-image", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Select Image",
@@ -106,13 +135,14 @@ ipcMain.handle("backend:write-mask", async (_event, dataUrl) => {
   return outPath;
 });
 ipcMain.handle("backend:save-output", async (_event, sourcePath, format) => {
-  if (!sourcePath || !fs.existsSync(sourcePath)) {
+  const resolvedPath = resolveOutputImagePath(sourcePath);
+  if (!resolvedPath) {
     throw new Error("Output file not found.");
   }
 
   const normalizedFormat = format === "jpg" ? "jpg" : "png";
-  const sourceDir = path.dirname(sourcePath);
-  const sourceBase = path.basename(sourcePath, path.extname(sourcePath));
+  const sourceDir = path.dirname(resolvedPath);
+  const sourceBase = path.basename(resolvedPath, path.extname(resolvedPath));
   const defaultPath = path.join(sourceDir, `${sourceBase}.${normalizedFormat}`);
 
   const save = await dialog.showSaveDialog(mainWindow, {
@@ -128,14 +158,23 @@ ipcMain.handle("backend:save-output", async (_event, sourcePath, format) => {
     return null;
   }
 
-  const img = nativeImage.createFromPath(sourcePath);
+  const ext = path.extname(save.filePath).toLowerCase();
+  const finalFormat = [".jpg", ".jpeg"].includes(ext) ? "jpg" : normalizedFormat;
+  const withExt = ext ? save.filePath : `${save.filePath}.${finalFormat}`;
+
+  const sourceExt = path.extname(resolvedPath).toLowerCase();
+  const sourceFormat = [".jpg", ".jpeg"].includes(sourceExt) ? "jpg" : sourceExt === ".png" ? "png" : null;
+
+  if (sourceFormat && sourceFormat === finalFormat) {
+    fs.copyFileSync(resolvedPath, withExt);
+    return withExt;
+  }
+
+  const img = nativeImage.createFromPath(resolvedPath);
   if (img.isEmpty()) {
     throw new Error("Failed to load output image for saving.");
   }
 
-  const ext = path.extname(save.filePath).toLowerCase();
-  const finalFormat = [".jpg", ".jpeg"].includes(ext) ? "jpg" : normalizedFormat;
-  const withExt = ext ? save.filePath : `${save.filePath}.${finalFormat}`;
   const outputBuffer = finalFormat === "jpg" ? img.toJPEG(92) : img.toPNG();
   fs.writeFileSync(withExt, outputBuffer);
   return withExt;
@@ -145,9 +184,8 @@ ipcMain.handle("backend:open-output-folder", async (_event, targetPath) => {
     throw new Error("No output path provided.");
   }
 
-  const existingPath = fs.existsSync(targetPath)
-    ? targetPath
-    : path.dirname(targetPath);
+  const resolvedPath = resolveOutputImagePath(targetPath);
+  const existingPath = resolvedPath || (fs.existsSync(targetPath) ? targetPath : path.dirname(targetPath));
 
   shell.showItemInFolder(existingPath);
   return true;

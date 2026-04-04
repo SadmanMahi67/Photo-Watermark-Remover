@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("backend", {
   getStatus: () => ipcRenderer.invoke("backend:get-status"),
   restart: () => ipcRenderer.invoke("backend:restart"),
+  getDevices: () => ipcRenderer.invoke("backend:get-devices"),
   pickImage: () => ipcRenderer.invoke("backend:pick-image"),
   startInpaint: (payload) => ipcRenderer.invoke("backend:start-inpaint", payload),
   getJob: (jobId) => ipcRenderer.invoke("backend:get-job", jobId),
