@@ -2,7 +2,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
 const crypto = require("node:crypto");
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require("electron");
 const { BackendManager } = require("./backendManager");
 
 let mainWindow = null;
@@ -104,6 +104,53 @@ ipcMain.handle("backend:write-mask", async (_event, dataUrl) => {
   const outPath = path.join(outputDir, fileName);
   fs.writeFileSync(outPath, Buffer.from(base64, "base64"));
   return outPath;
+});
+ipcMain.handle("backend:save-output", async (_event, sourcePath, format) => {
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    throw new Error("Output file not found.");
+  }
+
+  const normalizedFormat = format === "jpg" ? "jpg" : "png";
+  const sourceDir = path.dirname(sourcePath);
+  const sourceBase = path.basename(sourcePath, path.extname(sourcePath));
+  const defaultPath = path.join(sourceDir, `${sourceBase}.${normalizedFormat}`);
+
+  const save = await dialog.showSaveDialog(mainWindow, {
+    title: "Save Output Image",
+    defaultPath,
+    filters: [
+      { name: "PNG", extensions: ["png"] },
+      { name: "JPEG", extensions: ["jpg", "jpeg"] },
+    ],
+  });
+
+  if (save.canceled || !save.filePath) {
+    return null;
+  }
+
+  const img = nativeImage.createFromPath(sourcePath);
+  if (img.isEmpty()) {
+    throw new Error("Failed to load output image for saving.");
+  }
+
+  const ext = path.extname(save.filePath).toLowerCase();
+  const finalFormat = [".jpg", ".jpeg"].includes(ext) ? "jpg" : normalizedFormat;
+  const withExt = ext ? save.filePath : `${save.filePath}.${finalFormat}`;
+  const outputBuffer = finalFormat === "jpg" ? img.toJPEG(92) : img.toPNG();
+  fs.writeFileSync(withExt, outputBuffer);
+  return withExt;
+});
+ipcMain.handle("backend:open-output-folder", async (_event, targetPath) => {
+  if (!targetPath) {
+    throw new Error("No output path provided.");
+  }
+
+  const existingPath = fs.existsSync(targetPath)
+    ? targetPath
+    : path.dirname(targetPath);
+
+  shell.showItemInFolder(existingPath);
+  return true;
 });
 
 app.on("before-quit", async (event) => {

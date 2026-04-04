@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("backend", {
   getJob: (jobId) => ipcRenderer.invoke("backend:get-job", jobId),
   cancelJob: (jobId) => ipcRenderer.invoke("backend:cancel-job", jobId),
   writeMaskDataUrl: (dataUrl) => ipcRenderer.invoke("backend:write-mask", dataUrl),
+  saveOutput: (sourcePath, format) => ipcRenderer.invoke("backend:save-output", sourcePath, format),
+  openOutputFolder: (targetPath) => ipcRenderer.invoke("backend:open-output-folder", targetPath),
   onStatusChanged: (listener) => {
     const wrapped = (_event, payload) => listener(payload);
     ipcRenderer.on("backend:status", wrapped);

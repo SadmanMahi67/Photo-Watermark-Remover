@@ -3,6 +3,9 @@ const canvasWrap = document.getElementById("canvasWrap");
 const dropZone = document.getElementById("dropZone");
 const resultArea = document.getElementById("resultArea");
 const outputStateText = document.getElementById("outputStateText");
+const outputFormatSelect = document.getElementById("outputFormatSelect");
+const saveOutputBtn = document.getElementById("saveOutputBtn");
+const openFolderBtn = document.getElementById("openFolderBtn");
 const backendPill = document.getElementById("backendPill");
 const statusText = document.getElementById("statusText");
 const fileText = document.getElementById("fileText");
@@ -102,6 +105,7 @@ function syncUi() {
   fileText.textContent = jobState.imageSource || "No image selected";
 
   const hasImage = Boolean(jobState.imageSource);
+  const hasOutput = Boolean(jobState.output);
   const running = jobState.status === "processing" || jobState.status === "cancelling";
   const canRetry = Boolean(hasImage && jobState.error);
   removeBtn.disabled = !hasImage || running || !backendReady;
@@ -112,6 +116,9 @@ function syncUi() {
   cancelBtn.disabled = !currentJobId || !running;
   retryBtn.disabled = !canRetry || running;
   resetJobBtn.disabled = running;
+  saveOutputBtn.disabled = !hasOutput || running;
+  openFolderBtn.disabled = !hasOutput || running;
+  outputFormatSelect.disabled = running;
 
   if (jobState.error) {
     errorNote.style.display = "block";
@@ -272,8 +279,30 @@ function paintOutput(path) {
     return;
   }
   outputPanelState = "output-loaded";
-  const src = fileUrlFromPath(path);
-  resultArea.innerHTML = `<img alt="Output preview" src="${src}?t=${Date.now()}" />`;
+  const outputSrc = fileUrlFromPath(path);
+  const inputSrc = jobState.imageSource ? fileUrlFromPath(jobState.imageSource) : outputSrc;
+  const token = Date.now();
+  resultArea.innerHTML = `
+    <div class="compare-wrap">
+      <div class="compare-stage">
+        <img class="compare-base" src="${inputSrc}?t=${token}" alt="Before image" />
+        <img id="compareOverlay" class="compare-overlay" src="${outputSrc}?t=${token}" alt="After image" />
+      </div>
+      <input id="compareSlider" class="compare-slider" type="range" min="0" max="100" step="1" value="50" />
+      <div class="compare-labels">
+        <span>Before</span>
+        <span>After</span>
+      </div>
+    </div>
+  `;
+
+  const slider = document.getElementById("compareSlider");
+  const overlay = document.getElementById("compareOverlay");
+  slider.addEventListener("input", () => {
+    const value = Number(slider.value);
+    overlay.style.clipPath = `inset(0 ${100 - value}% 0 0)`;
+  });
+
   outputStateText.textContent = "Output state: output loaded";
 }
 
@@ -385,6 +414,41 @@ async function cancelCurrentJob() {
     jobState.status = "error";
     jobState.error = `Cancel failed: ${error?.message || error}`;
     setOutputState("error");
+    syncUi();
+  }
+}
+
+async function saveOutputImage() {
+  if (!jobState.output) {
+    return;
+  }
+
+  try {
+    const format = outputFormatSelect.value === "jpg" ? "jpg" : "png";
+    const savedPath = await window.backend.saveOutput(jobState.output, format);
+    if (!savedPath) {
+      return;
+    }
+    jobState.error = null;
+    outputStateText.textContent = `Output state: saved to ${savedPath}`;
+    syncUi();
+  } catch (error) {
+    jobState.error = `Save failed: ${error?.message || error}`;
+    syncUi();
+  }
+}
+
+async function openOutputFolder() {
+  if (!jobState.output) {
+    return;
+  }
+
+  try {
+    await window.backend.openOutputFolder(jobState.output);
+    jobState.error = null;
+    syncUi();
+  } catch (error) {
+    jobState.error = `Open folder failed: ${error?.message || error}`;
     syncUi();
   }
 }
@@ -564,6 +628,14 @@ retryBtn.addEventListener("click", async () => {
 
 resetJobBtn.addEventListener("click", () => {
   clearJobState();
+});
+
+saveOutputBtn.addEventListener("click", async () => {
+  await saveOutputImage();
+});
+
+openFolderBtn.addEventListener("click", async () => {
+  await openOutputFolder();
 });
 
 window.backend.onStatusChanged((status) => {
