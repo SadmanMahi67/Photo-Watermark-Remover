@@ -2,9 +2,12 @@ const canvas = document.getElementById("paintCanvas");
 const canvasWrap = document.getElementById("canvasWrap");
 const dropZone = document.getElementById("dropZone");
 const resultArea = document.getElementById("resultArea");
+const outputStateText = document.getElementById("outputStateText");
 const backendPill = document.getElementById("backendPill");
 const statusText = document.getElementById("statusText");
 const fileText = document.getElementById("fileText");
+const progressBar = document.getElementById("progressBar");
+const errorNote = document.getElementById("errorNote");
 
 const brushSizeInput = document.getElementById("brushSize");
 const brushSizeLabel = document.getElementById("brushSizeLabel");
@@ -15,6 +18,9 @@ const eraserBtn = document.getElementById("eraserBtn");
 const clearMaskBtn = document.getElementById("clearMaskBtn");
 const resetViewBtn = document.getElementById("resetViewBtn");
 const removeBtn = document.getElementById("removeBtn");
+const cancelBtn = document.getElementById("cancelBtn");
+const retryBtn = document.getElementById("retryBtn");
+const resetJobBtn = document.getElementById("resetJobBtn");
 
 const ctx = canvas.getContext("2d");
 const sourceCanvas = document.createElement("canvas");
@@ -31,6 +37,26 @@ const jobState = {
 };
 
 let backendReady = false;
+let outputPanelState = "no-output";
+let currentJobId = null;
+
+function humanStage(stage) {
+  const map = {
+    idle: "Idle",
+    ready: "Ready",
+    exporting_mask: "Preparing mask",
+    starting_backend_job: "Starting AI removal",
+    validating_input: "Validating input",
+    loading_model: "Loading model",
+    inpainting: "Removing watermark",
+    writing_output: "Writing output",
+    completed: "Completed",
+    failed: "Failed",
+    cancelled: "Cancelled",
+    cancelling: "Cancelling",
+  };
+  return map[stage] || "Working";
+}
 
 const viewState = {
   image: null,
@@ -55,23 +81,67 @@ function syncUi() {
   eraserBtn.classList.toggle("toggle-on", viewState.eraser);
   eraserBtn.textContent = viewState.eraser ? "Eraser On" : "Eraser Off";
 
+  const stageLabel = humanStage(jobState.progress.stage);
+  const percent = Math.max(0, Math.min(100, Number(jobState.progress.percent || 0)));
   statusText.textContent = `Status: ${jobState.status}`;
-  if (jobState.progress.stage && jobState.status === "processing") {
-    statusText.textContent = `Status: ${jobState.progress.stage} ${jobState.progress.percent}%`;
+  if (jobState.status === "processing" || jobState.status === "cancelling") {
+    statusText.textContent = `Status: ${stageLabel} ${percent}%`;
+  }
+  if (jobState.status === "completed") {
+    statusText.textContent = "Status: Completed";
+  }
+  if (jobState.status === "cancelled") {
+    statusText.textContent = "Status: Cancelled";
   }
   if (jobState.error) {
-    statusText.textContent = `Status: error - ${jobState.error}`;
+    statusText.textContent = `Status: Error`;
   }
+
+  progressBar.style.width = `${percent}%`;
 
   fileText.textContent = jobState.imageSource || "No image selected";
 
   const hasImage = Boolean(jobState.imageSource);
-  const running = jobState.status === "processing";
+  const running = jobState.status === "processing" || jobState.status === "cancelling";
+  const canRetry = Boolean(hasImage && jobState.error);
   removeBtn.disabled = !hasImage || running || !backendReady;
   openImageBtn.disabled = running;
   eraserBtn.disabled = running || !hasImage;
   clearMaskBtn.disabled = running || !hasImage;
   resetViewBtn.disabled = running || !hasImage;
+  cancelBtn.disabled = !currentJobId || !running;
+  retryBtn.disabled = !canRetry || running;
+  resetJobBtn.disabled = running;
+
+  if (jobState.error) {
+    errorNote.style.display = "block";
+    errorNote.textContent = `${jobState.error} Use Retry or Reset.`;
+  } else {
+    errorNote.style.display = "none";
+    errorNote.textContent = "";
+  }
+}
+
+function setOutputState(state) {
+  outputPanelState = state;
+
+  if (state === "no-output") {
+    resultArea.innerHTML = '<div class="empty-note">Run removal to preview output.</div>';
+    outputStateText.textContent = "Output state: no output";
+    return;
+  }
+
+  if (state === "processing") {
+    resultArea.innerHTML = '<div class="empty-note">Processing image, output will appear here.</div>';
+    outputStateText.textContent = "Output state: processing";
+    return;
+  }
+
+  if (state === "error") {
+    resultArea.innerHTML = '<div class="empty-note">Could not generate output. Please retry.</div>';
+    outputStateText.textContent = "Output state: failed";
+    return;
+  }
 }
 
 function setBackendStatus(status) {
@@ -80,6 +150,20 @@ function setBackendStatus(status) {
   backendPill.style.background = status.ready ? "#d6f6f1" : "#fef3c7";
   backendPill.style.color = status.ready ? "#147d75" : "#92400e";
   syncUi();
+}
+
+function hasMaskPixels() {
+  if (!maskCanvas.width || !maskCanvas.height) {
+    return false;
+  }
+
+  const { data } = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] > 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function fitImageToView() {
@@ -184,11 +268,39 @@ async function loadImage(filePath) {
 
 function paintOutput(path) {
   if (!path) {
-    resultArea.innerHTML = '<div class="empty-note">Run removal to preview output.</div>';
+    setOutputState("no-output");
     return;
   }
+  outputPanelState = "output-loaded";
   const src = fileUrlFromPath(path);
   resultArea.innerHTML = `<img alt="Output preview" src="${src}?t=${Date.now()}" />`;
+  outputStateText.textContent = "Output state: output loaded";
+}
+
+function clearJobState() {
+  jobState.imageSource = null;
+  jobState.maskSource = null;
+  jobState.status = "idle";
+  jobState.progress = { stage: "idle", percent: 0, error: null };
+  jobState.output = null;
+  jobState.error = null;
+  currentJobId = null;
+
+  viewState.image = null;
+  viewState.zoom = 1;
+  viewState.panX = 0;
+  viewState.panY = 0;
+  viewState.isDrawing = false;
+  viewState.isPanning = false;
+
+  sourceCanvas.width = 0;
+  sourceCanvas.height = 0;
+  maskCanvas.width = 0;
+  maskCanvas.height = 0;
+
+  setOutputState("no-output");
+  render();
+  syncUi();
 }
 
 async function removeWatermark() {
@@ -198,10 +310,17 @@ async function removeWatermark() {
     return;
   }
 
+  if (!hasMaskPixels()) {
+    jobState.error = "Mask is empty. Paint over the watermark before removing.";
+    syncUi();
+    return;
+  }
+
   try {
     jobState.error = null;
     jobState.status = "processing";
     jobState.progress = { stage: "exporting_mask", percent: 15, error: null };
+    setOutputState("processing");
     syncUi();
 
     const maskDataUrl = maskCanvas.toDataURL("image/png");
@@ -215,26 +334,57 @@ async function removeWatermark() {
       mask_path: jobState.maskSource,
     });
 
-    const jobId = started.job_id;
+    currentJobId = started.job_id;
     while (true) {
-      const detail = await window.backend.getJob(jobId);
+      const detail = await window.backend.getJob(currentJobId);
       jobState.progress = detail.progress;
       jobState.status = detail.status;
       jobState.output = detail.output_path || null;
       if (detail.status === "completed") {
+        currentJobId = null;
         paintOutput(jobState.output);
         syncUi();
         return;
       }
-      if (detail.status === "failed" || detail.status === "cancelled") {
+      if (detail.status === "cancelled") {
+        currentJobId = null;
+        jobState.status = "cancelled";
+        jobState.error = null;
+        jobState.progress = { stage: "cancelled", percent: 0, error: null };
+        setOutputState("no-output");
+        syncUi();
+        return;
+      }
+      if (detail.status === "failed") {
+        currentJobId = null;
         throw new Error(detail.progress?.error || `Job ${detail.status}`);
       }
       syncUi();
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   } catch (error) {
+    currentJobId = null;
     jobState.status = "error";
     jobState.error = error?.message || String(error);
+    setOutputState("error");
+    syncUi();
+  }
+}
+
+async function cancelCurrentJob() {
+  if (!currentJobId) {
+    return;
+  }
+
+  try {
+    jobState.status = "cancelling";
+    jobState.progress = { stage: "cancelling", percent: jobState.progress.percent || 0, error: null };
+    syncUi();
+    await window.backend.cancelJob(currentJobId);
+  } catch (error) {
+    jobState.status = "error";
+    jobState.error = `Cancel failed: ${error?.message || error}`;
+    setOutputState("error");
     syncUi();
   }
 }
@@ -381,7 +531,9 @@ eraserBtn.addEventListener("click", () => {
 
 clearMaskBtn.addEventListener("click", () => {
   maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+  jobState.error = null;
   render();
+  syncUi();
 });
 
 resetViewBtn.addEventListener("click", () => {
@@ -397,6 +549,23 @@ removeBtn.addEventListener("click", async () => {
   await removeWatermark();
 });
 
+cancelBtn.addEventListener("click", async () => {
+  await cancelCurrentJob();
+});
+
+retryBtn.addEventListener("click", async () => {
+  if (!jobState.imageSource) {
+    return;
+  }
+  jobState.error = null;
+  syncUi();
+  await removeWatermark();
+});
+
+resetJobBtn.addEventListener("click", () => {
+  clearJobState();
+});
+
 window.backend.onStatusChanged((status) => {
   setBackendStatus(status);
   if (status.lastError && jobState.status !== "processing") {
@@ -407,6 +576,7 @@ window.backend.onStatusChanged((status) => {
 
 (async function init() {
   resizeCanvas();
+  setOutputState("no-output");
   syncUi();
 
   try {
