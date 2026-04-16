@@ -413,6 +413,10 @@ class BackendManager extends EventEmitter {
     return this.requestJson("POST", "/inpaint", payload);
   }
 
+  async suggestMask(payload) {
+    return this.requestJson("POST", "/mask/suggest", payload);
+  }
+
   async getJob(jobId) {
     return this.requestJson("GET", `/jobs/${jobId}`);
   }

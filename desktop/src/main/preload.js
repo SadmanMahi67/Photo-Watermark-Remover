@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("backend", {
   restart: () => ipcRenderer.invoke("backend:restart"),
   getDevices: () => ipcRenderer.invoke("backend:get-devices"),
   pickImage: () => ipcRenderer.invoke("backend:pick-image"),
+  suggestMask: (payload) => ipcRenderer.invoke("backend:suggest-mask", payload),
   startInpaint: (payload) => ipcRenderer.invoke("backend:start-inpaint", payload),
   getJob: (jobId) => ipcRenderer.invoke("backend:get-job", jobId),
   getJobs: () => ipcRenderer.invoke("backend:get-jobs"),
@@ -22,6 +23,19 @@ contextBridge.exposeInMainWorld("backend", {
     ipcRenderer.on("backend:log", wrapped);
     return () => ipcRenderer.removeListener("backend:log", wrapped);
   },
+});
+
+contextBridge.exposeInMainWorld("projects", {
+  pickFolder: () => ipcRenderer.invoke("project:pick-folder"),
+  openFolder: (folderPath) => ipcRenderer.invoke("project:open-folder", folderPath),
+  getActive: () => ipcRenderer.invoke("project:get-active"),
+  selectImage: (imagePath) => ipcRenderer.invoke("project:select-image", imagePath),
+  getMaskPath: (imagePath) => ipcRenderer.invoke("project:get-mask-path", imagePath),
+  saveMask: (imagePath, dataUrl) => ipcRenderer.invoke("project:save-mask", imagePath, dataUrl),
+  updateJobHistory: (payload) => ipcRenderer.invoke("project:update-job-history", payload),
+  getQueue: () => ipcRenderer.invoke("project:get-queue"),
+  setQueue: (queueItems) => ipcRenderer.invoke("project:set-queue", queueItems),
+  updateSettings: (settingsPatch) => ipcRenderer.invoke("project:update-settings", settingsPatch),
 });
 
 contextBridge.exposeInMainWorld("updater", {

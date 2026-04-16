@@ -23,12 +23,24 @@ const updateToastText = document.getElementById("updateToastText");
 const updateToastMeta = document.getElementById("updateToastMeta");
 const updateYesBtn = document.getElementById("updateYesBtn");
 const updateLaterBtn = document.getElementById("updateLaterBtn");
+const openProjectBtn = document.getElementById("openProjectBtn");
+const projectPathText = document.getElementById("projectPathText");
+const projectImageList = document.getElementById("projectImageList");
 
 const brushSizeInput = document.getElementById("brushSize");
 const brushSizeLabel = document.getElementById("brushSizeLabel");
+const suggestStrengthInput = document.getElementById("suggestStrength");
+const suggestStrengthLabel = document.getElementById("suggestStrengthLabel");
+const suggestPresetLowBtn = document.getElementById("suggestPresetLow");
+const suggestPresetMediumBtn = document.getElementById("suggestPresetMedium");
+const suggestPresetHighBtn = document.getElementById("suggestPresetHigh");
 const zoomSlider = document.getElementById("zoomSlider");
 const zoomLabel = document.getElementById("zoomLabel");
 const openImageBtn = document.getElementById("openImageBtn");
+const suggestMaskBtn = document.getElementById("suggestMaskBtn");
+const suggestQueueBtn = document.getElementById("suggestQueueBtn");
+const toggleSuggestPreviewBtn = document.getElementById("toggleSuggestPreviewBtn");
+const applySuggestedMaskBtn = document.getElementById("applySuggestedMaskBtn");
 const eraserBtn = document.getElementById("eraserBtn");
 const clearMaskBtn = document.getElementById("clearMaskBtn");
 const resetViewBtn = document.getElementById("resetViewBtn");
@@ -46,6 +58,8 @@ const ctx = canvas.getContext("2d");
 const sourceCanvas = document.createElement("canvas");
 const maskCanvas = document.createElement("canvas");
 const maskCtx = maskCanvas.getContext("2d");
+const suggestedMaskCanvas = document.createElement("canvas");
+const suggestedMaskCtx = suggestedMaskCanvas.getContext("2d");
 
 const jobState = {
   imageSource: null,
@@ -63,6 +77,10 @@ const queueStore = {
   processingAll: false,
 };
 
+const projectState = {
+  project: null,
+};
+
 let backendReady = false;
 let outputPanelState = "no-output";
 let currentJobStartedAt = null;
@@ -73,6 +91,21 @@ let updatePromptVisible = false;
 let updateInstallVersion = null;
 let updateInstallAccepted = false;
 let currentTheme = "light";
+let suggestStrength = Number(suggestStrengthInput?.value || 50);
+let suggestPreset = "medium";
+let previewSuggestedMask = false;
+
+const SUGGEST_PRESET_STRENGTH = {
+  low: 30,
+  medium: 50,
+  high: 75,
+};
+
+const suggestedMaskState = {
+  available: false,
+  imagePath: null,
+  maskPath: null,
+};
 
 const THEME_KEY = "pwr.theme";
 const THEME_LIGHT = "light";
@@ -103,6 +136,364 @@ async function refreshQueueSnapshot() {
   for (const job of jobs) {
     upsertQueueJob(job);
   }
+}
+
+function fileNameFromPath(inputPath) {
+  if (!inputPath) {
+    return "";
+  }
+  const slash = Math.max(inputPath.lastIndexOf("/"), inputPath.lastIndexOf("\\"));
+  return slash >= 0 ? inputPath.slice(slash + 1) : inputPath;
+}
+
+function isProjectImageActive(imagePath) {
+  return Boolean(projectState.project && projectState.project.activeImagePath === imagePath);
+}
+
+function projectImageStatus(imagePath) {
+  const status = projectState.project?.jobHistory?.[imagePath]?.status || null;
+  if (!status) {
+    return { label: "New", className: "pending" };
+  }
+  if (status === "processing") {
+    return { label: "Processing", className: "processing" };
+  }
+  if (status === "completed") {
+    return { label: "Done", className: "completed" };
+  }
+  if (status === "failed") {
+    return { label: "Failed", className: "failed" };
+  }
+  if (status === "cancelled") {
+    return { label: "Cancelled", className: "cancelled" };
+  }
+  return { label: String(status), className: "pending" };
+}
+
+function hasSuggestedMaskPreview() {
+  return Boolean(
+    suggestedMaskState.available
+    && suggestedMaskState.imagePath
+    && suggestedMaskState.imagePath === jobState.imageSource
+    && suggestedMaskCanvas.width > 0
+    && suggestedMaskCanvas.height > 0,
+  );
+}
+
+function clearSuggestedMaskPreview() {
+  suggestedMaskState.available = false;
+  suggestedMaskState.imagePath = null;
+  suggestedMaskState.maskPath = null;
+  suggestedMaskCanvas.width = 0;
+  suggestedMaskCanvas.height = 0;
+}
+
+function updatePresetButtonsUi() {
+  suggestPresetLowBtn?.classList.toggle("toggle-on", suggestPreset === "low");
+  suggestPresetMediumBtn?.classList.toggle("toggle-on", suggestPreset === "medium");
+  suggestPresetHighBtn?.classList.toggle("toggle-on", suggestPreset === "high");
+}
+
+function setSuggestPreset(nextPreset, options = {}) {
+  const persist = options.persist !== false;
+  if (!Object.prototype.hasOwnProperty.call(SUGGEST_PRESET_STRENGTH, nextPreset)) {
+    return;
+  }
+  suggestPreset = nextPreset;
+  suggestStrength = SUGGEST_PRESET_STRENGTH[nextPreset];
+  if (suggestStrengthInput) {
+    suggestStrengthInput.value = String(suggestStrength);
+  }
+  if (persist) {
+    persistProjectAutoMaskSettings().catch(() => {});
+  }
+  syncUi();
+}
+
+function projectImageHistory(imagePath) {
+  return projectState.project?.jobHistory?.[imagePath] || null;
+}
+
+function formatProjectUpdatedAt(ts) {
+  if (!Number.isFinite(Number(ts))) {
+    return "Unknown time";
+  }
+  const date = new Date(Number(ts));
+  return date.toLocaleString();
+}
+
+function projectStatusTooltip(imagePath, statusLabel) {
+  const history = projectImageHistory(imagePath);
+  if (!history) {
+    return "No jobs yet";
+  }
+
+  const when = formatProjectUpdatedAt(history.updatedAt);
+  const outputHint = history.outputPath ? " | Click badge to preview output" : "";
+  return `${statusLabel} | Last run: ${when}${outputHint}`;
+}
+
+function serializeQueueForProject() {
+  return queueStore.queuedItems.map((item) => ({
+    id: item.id,
+    imagePath: item.imagePath,
+    maskPath: item.maskPath,
+    device: item.device,
+    status: item.status,
+    progress: item.progress,
+    backendJobId: item.backendJobId,
+    outputPath: item.outputPath,
+    error: item.error,
+    createdAt: item.createdAt,
+  }));
+}
+
+function hydrateQueueItem(raw) {
+  return {
+    id: String(raw?.id || `queue-${Date.now()}-${Math.random().toString(16).slice(2)}`),
+    imagePath: raw?.imagePath || "",
+    maskPath: raw?.maskPath || "",
+    device: raw?.device || selectedDevice,
+    status: raw?.status || "pending",
+    progress: raw?.progress || { stage: "pending", percent: 0, error: null },
+    backendJobId: raw?.backendJobId || null,
+    outputPath: raw?.outputPath || null,
+    error: raw?.error || null,
+    createdAt: Number(raw?.createdAt || Date.now()),
+  };
+}
+
+async function persistQueueToProject() {
+  if (!projectState.project || !window.projects?.setQueue) {
+    return;
+  }
+
+  const saved = await window.projects.setQueue(serializeQueueForProject());
+  if (Array.isArray(saved)) {
+    queueStore.queuedItems = saved.map(hydrateQueueItem);
+  }
+}
+
+async function restoreQueueFromProject() {
+  if (!projectState.project || !window.projects?.getQueue) {
+    return;
+  }
+
+  const saved = await window.projects.getQueue();
+  if (!Array.isArray(saved)) {
+    return;
+  }
+
+  queueStore.queuedItems = saved.map(hydrateQueueItem);
+  queueStore.activeJobId = null;
+  queueStore.processingAll = false;
+}
+
+function currentProjectImageIndex() {
+  const images = projectState.project?.images || [];
+  const active = projectState.project?.activeImagePath || null;
+  if (!active || !images.length) {
+    return -1;
+  }
+  return images.indexOf(active);
+}
+
+async function selectAdjacentProjectImage(offset) {
+  if (!projectState.project?.images?.length) {
+    return;
+  }
+  const currentIndex = currentProjectImageIndex();
+  if (currentIndex < 0) {
+    return;
+  }
+  const nextIndex = currentIndex + offset;
+  if (nextIndex < 0 || nextIndex >= projectState.project.images.length) {
+    return;
+  }
+  await selectProjectImage(projectState.project.images[nextIndex]);
+}
+
+function renderProjectImages() {
+  if (!projectImageList || !projectPathText) {
+    return;
+  }
+
+  const project = projectState.project;
+  if (!project) {
+    projectPathText.textContent = "No project folder opened.";
+    projectImageList.innerHTML = "<li class=\"empty-note\">Open a folder to start a project.</li>";
+    return;
+  }
+
+  projectPathText.textContent = project.folderPath || "Project opened";
+  const images = Array.isArray(project.images) ? project.images : [];
+  if (!images.length) {
+    projectImageList.innerHTML = "<li class=\"empty-note\">No PNG/JPG images found in this folder.</li>";
+    return;
+  }
+
+  const html = images.map((imagePath) => {
+    const name = fileNameFromPath(imagePath);
+    const activeClass = isProjectImageActive(imagePath) ? "active" : "";
+    const imageStatus = projectImageStatus(imagePath);
+    const history = projectImageHistory(imagePath);
+    const hasOutputClass = history?.outputPath ? "has-output" : "";
+    const statusTitle = projectStatusTooltip(imagePath, imageStatus.label).replace(/"/g, "&quot;");
+    const safePath = String(imagePath).replace(/"/g, "&quot;");
+    const thumb = fileUrlFromPath(imagePath);
+    return `
+      <li>
+        <button class="project-image-btn ${activeClass} ${hasOutputClass}" type="button" data-project-image="${safePath}" title="${safePath}">
+          <img class="project-image-thumb" src="${thumb}" alt="${name}" />
+          <span class="project-image-name">${name}</span>
+          <span class="project-image-status ${imageStatus.className}" title="${statusTitle}">${imageStatus.label}</span>
+        </button>
+      </li>
+    `;
+  }).join("");
+
+  projectImageList.innerHTML = html;
+}
+
+async function persistCurrentMaskToProject() {
+  if (!projectState.project || !jobState.imageSource || !window.projects?.saveMask) {
+    return;
+  }
+  if (!projectState.project.images?.includes(jobState.imageSource)) {
+    return;
+  }
+
+  const dataUrl = maskCanvas.toDataURL("image/png");
+  await window.projects.saveMask(jobState.imageSource, dataUrl);
+}
+
+async function loadMaskFromPath(maskPath) {
+  if (!maskPath) {
+    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    render();
+    return;
+  }
+
+  await loadMaskIntoCanvas(maskPath, maskCanvas, maskCtx);
+  render();
+}
+
+async function loadMaskIntoCanvas(maskPath, targetCanvas, targetCtx) {
+  if (!maskPath) {
+    targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+    return;
+  }
+
+  const img = new Image();
+  const src = fileUrlFromPath(maskPath);
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = reject;
+    img.src = src;
+  });
+
+  if (targetCanvas.width !== maskCanvas.width || targetCanvas.height !== maskCanvas.height) {
+    targetCanvas.width = maskCanvas.width;
+    targetCanvas.height = maskCanvas.height;
+  }
+  targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+  targetCtx.drawImage(img, 0, 0, targetCanvas.width, targetCanvas.height);
+}
+
+async function applySuggestedMaskToEditor(options = {}) {
+  const persist = options.persist !== false;
+  if (!hasSuggestedMaskPreview()) {
+    return;
+  }
+
+  if (maskCanvas.width !== suggestedMaskCanvas.width || maskCanvas.height !== suggestedMaskCanvas.height) {
+    maskCanvas.width = suggestedMaskCanvas.width;
+    maskCanvas.height = suggestedMaskCanvas.height;
+  }
+  maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+  maskCtx.drawImage(suggestedMaskCanvas, 0, 0, maskCanvas.width, maskCanvas.height);
+  jobState.maskSource = suggestedMaskState.maskPath;
+  if (persist) {
+    await persistCurrentMaskToProject();
+  }
+  render();
+}
+
+async function selectProjectImage(imagePath) {
+  if (!projectState.project || !imagePath || !window.projects?.selectImage) {
+    return;
+  }
+
+  projectState.project = await window.projects.selectImage(imagePath);
+  await loadImage(imagePath);
+
+  const maskPath = await window.projects.getMaskPath(imagePath);
+  await loadMaskFromPath(maskPath);
+  renderProjectImages();
+}
+
+async function openProjectFolderFlow() {
+  if (!window.projects?.pickFolder || !window.projects?.openFolder) {
+    return;
+  }
+
+  const folderPath = await window.projects.pickFolder();
+  if (!folderPath) {
+    return;
+  }
+
+  projectState.project = await window.projects.openFolder(folderPath);
+  applyProjectSettingsToUi();
+  await restoreQueueFromProject();
+  renderProjectImages();
+  if (projectState.project?.activeImagePath) {
+    await selectProjectImage(projectState.project.activeImagePath);
+  }
+  syncUi();
+}
+
+async function updateProjectJobHistory(imagePath, status, outputPath, jobId) {
+  if (!projectState.project || !window.projects?.updateJobHistory || !imagePath) {
+    return;
+  }
+  projectState.project = await window.projects.updateJobHistory({
+    imagePath,
+    status,
+    outputPath: outputPath || null,
+    jobId: jobId || null,
+  });
+  renderProjectImages();
+}
+
+function applyProjectSettingsToUi() {
+  const autoMask = projectState.project?.settings?.autoMask || {};
+  const presetValue = String(autoMask.preset || "medium").toLowerCase();
+  if (["low", "medium", "high"].includes(presetValue)) {
+    suggestPreset = presetValue;
+  }
+
+  const defaultStrength = SUGGEST_PRESET_STRENGTH[suggestPreset] || 50;
+  const value = Number(autoMask.strength || defaultStrength);
+  suggestStrength = Math.max(1, Math.min(100, Number.isFinite(value) ? value : defaultStrength));
+  previewSuggestedMask = Boolean(autoMask.previewSuggestedMask);
+  if (suggestStrengthInput) {
+    suggestStrengthInput.value = String(suggestStrength);
+  }
+  updatePresetButtonsUi();
+}
+
+async function persistProjectAutoMaskSettings() {
+  if (!projectState.project || !window.projects?.updateSettings) {
+    return;
+  }
+
+  projectState.project = await window.projects.updateSettings({
+    autoMask: {
+      strength: suggestStrength,
+      preset: suggestPreset,
+      previewSuggestedMask,
+    },
+  });
 }
 
 function createQueueItem(payload) {
@@ -244,6 +635,8 @@ function humanStage(stage) {
     starting_backend_job: "Starting AI removal",
     validating_input: "Validating input",
     loading_model: "Loading model",
+    suggesting_mask: "Suggesting mask",
+    queuing: "Adding to queue",
     inpainting: "Removing watermark",
     writing_output: "Writing output",
     completed: "Completed",
@@ -273,6 +666,7 @@ function fileUrlFromPath(filePath) {
 
 function syncUi() {
   brushSizeLabel.textContent = `${viewState.brushSize}px`;
+  suggestStrengthLabel.textContent = `${Math.round(suggestStrength)}%`;
   zoomLabel.textContent = `${Math.round(viewState.zoom * 100)}%`;
   eraserBtn.classList.toggle("toggle-on", viewState.eraser);
   eraserBtn.textContent = viewState.eraser ? "Eraser On" : "Eraser Off";
@@ -308,6 +702,14 @@ function syncUi() {
   processAllBtn.disabled = !hasPendingQueueItems() || !backendReady || running || queueBusy;
   clearQueueBtn.disabled = queueBusy || queueStore.queuedItems.length === 0;
   openImageBtn.disabled = running || queueBusy;
+  suggestMaskBtn.disabled = !hasImage || running || queueBusy || !backendReady;
+  suggestQueueBtn.disabled = !hasImage || running || queueBusy || !backendReady;
+  if (toggleSuggestPreviewBtn) {
+    toggleSuggestPreviewBtn.disabled = !hasSuggestedMaskPreview() || running || queueBusy;
+  }
+  if (applySuggestedMaskBtn) {
+    applySuggestedMaskBtn.disabled = !hasSuggestedMaskPreview() || running || queueBusy;
+  }
   eraserBtn.disabled = running || queueBusy || !hasImage;
   clearMaskBtn.disabled = running || queueBusy || !hasImage;
   resetViewBtn.disabled = running || queueBusy || !hasImage;
@@ -318,6 +720,18 @@ function syncUi() {
   openFolderBtn.disabled = !hasOutput || running || queueBusy;
   outputFormatSelect.disabled = running || queueBusy;
   deviceSelect.disabled = running || queueBusy;
+  if (suggestStrengthInput) {
+    suggestStrengthInput.disabled = running || queueBusy;
+  }
+  if (suggestPresetLowBtn) suggestPresetLowBtn.disabled = running || queueBusy;
+  if (suggestPresetMediumBtn) suggestPresetMediumBtn.disabled = running || queueBusy;
+  if (suggestPresetHighBtn) suggestPresetHighBtn.disabled = running || queueBusy;
+
+  if (toggleSuggestPreviewBtn) {
+    toggleSuggestPreviewBtn.textContent = `Preview Suggested: ${previewSuggestedMask ? "On" : "Off"}`;
+    toggleSuggestPreviewBtn.classList.toggle("toggle-on", previewSuggestedMask);
+  }
+  updatePresetButtonsUi();
 
   if (jobState.error) {
     errorNote.style.display = "block";
@@ -457,16 +871,22 @@ function render() {
 
   ctx.drawImage(sourceCanvas, drawX, drawY, drawW, drawH);
 
-  const overlayCanvas = document.createElement("canvas");
-  overlayCanvas.width = maskCanvas.width;
-  overlayCanvas.height = maskCanvas.height;
-  const overlayCtx = overlayCanvas.getContext("2d");
-  overlayCtx.drawImage(maskCanvas, 0, 0);
-  overlayCtx.globalCompositeOperation = "source-in";
-  overlayCtx.fillStyle = "rgba(220, 38, 38, 0.55)";
-  overlayCtx.fillRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  const drawTintedMask = (maskSourceCanvas, fillStyle) => {
+    const overlayCanvas = document.createElement("canvas");
+    overlayCanvas.width = maskSourceCanvas.width;
+    overlayCanvas.height = maskSourceCanvas.height;
+    const overlayCtx = overlayCanvas.getContext("2d");
+    overlayCtx.drawImage(maskSourceCanvas, 0, 0);
+    overlayCtx.globalCompositeOperation = "source-in";
+    overlayCtx.fillStyle = fillStyle;
+    overlayCtx.fillRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    ctx.drawImage(overlayCanvas, drawX, drawY, drawW, drawH);
+  };
 
-  ctx.drawImage(overlayCanvas, drawX, drawY, drawW, drawH);
+  drawTintedMask(maskCanvas, "rgba(220, 38, 38, 0.55)");
+  if (previewSuggestedMask && hasSuggestedMaskPreview()) {
+    drawTintedMask(suggestedMaskCanvas, "rgba(14, 165, 233, 0.45)");
+  }
 }
 
 function clientToImagePoint(clientX, clientY) {
@@ -508,6 +928,7 @@ async function loadImage(filePath) {
   maskCanvas.width = img.width;
   maskCanvas.height = img.height;
   maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+  clearSuggestedMaskPreview();
 
   jobState.imageSource = filePath;
   jobState.maskSource = null;
@@ -556,6 +977,7 @@ function clearJobState() {
   sourceCanvas.height = 0;
   maskCanvas.width = 0;
   maskCanvas.height = 0;
+  clearSuggestedMaskPreview();
 
   setOutputState("no-output");
   render();
@@ -595,6 +1017,7 @@ async function removeWatermark() {
       mask_path: jobState.maskSource,
       device: selectedDevice,
     });
+    await updateProjectJobHistory(jobState.imageSource, "processing", null, started.job_id);
 
     const startedJob = {
       job_id: started.job_id,
@@ -620,6 +1043,7 @@ async function removeWatermark() {
       jobState.status = detail.status;
       jobState.output = detail.output_path || null;
       if (detail.status === "completed") {
+        await updateProjectJobHistory(jobState.imageSource, "completed", detail.output_path || null, detail.job_id);
         setActiveQueueJob(null);
         if (currentJobStartedAt !== null) {
           lastProcessingSeconds = (performance.now() - currentJobStartedAt) / 1000;
@@ -630,6 +1054,7 @@ async function removeWatermark() {
         return;
       }
       if (detail.status === "cancelled") {
+        await updateProjectJobHistory(jobState.imageSource, "cancelled", null, detail.job_id);
         setActiveQueueJob(null);
         currentJobStartedAt = null;
         jobState.status = "cancelled";
@@ -640,6 +1065,7 @@ async function removeWatermark() {
         return;
       }
       if (detail.status === "failed") {
+        await updateProjectJobHistory(jobState.imageSource, "failed", detail.output_path || null, detail.job_id);
         setActiveQueueJob(null);
         currentJobStartedAt = null;
         throw new Error(detail.progress?.error || `Job ${detail.status}`);
@@ -673,12 +1099,18 @@ async function addCurrentImageToQueue() {
   try {
     jobState.error = null;
     const maskDataUrl = maskCanvas.toDataURL("image/png");
-    const maskPath = await window.backend.writeMaskDataUrl(maskDataUrl);
+    const maskPath = projectState.project && window.projects?.saveMask
+      ? await window.projects.saveMask(jobState.imageSource, maskDataUrl)
+      : await window.backend.writeMaskDataUrl(maskDataUrl);
+    if (projectState.project && window.projects?.saveMask) {
+      await persistCurrentMaskToProject();
+    }
     queueStore.queuedItems.push(createQueueItem({
       imagePath: jobState.imageSource,
       maskPath,
       device: selectedDevice,
     }));
+    await persistQueueToProject();
     syncUi();
   } catch (error) {
     jobState.error = `Failed to add queue item: ${error?.message || error}`;
@@ -697,6 +1129,7 @@ async function processQueuedItem(item) {
     mask_path: item.maskPath,
     device: item.device,
   });
+  await updateProjectJobHistory(item.imagePath, "processing", null, started.job_id);
 
   item.backendJobId = started.job_id;
   setActiveQueueJob(started.job_id);
@@ -709,21 +1142,27 @@ async function processQueuedItem(item) {
 
     if (detail.status === "completed") {
       item.status = "completed";
+      await updateProjectJobHistory(item.imagePath, "completed", detail.output_path || null, detail.job_id);
       setActiveQueueJob(null);
+      await persistQueueToProject();
       syncUi();
       return;
     }
     if (detail.status === "cancelled") {
       item.status = "cancelled";
       item.error = null;
+      await updateProjectJobHistory(item.imagePath, "cancelled", null, detail.job_id);
       setActiveQueueJob(null);
+      await persistQueueToProject();
       syncUi();
       return;
     }
     if (detail.status === "failed") {
       item.status = "failed";
       item.error = detail.progress?.error || "Queue item failed";
+      await updateProjectJobHistory(item.imagePath, "failed", detail.output_path || null, detail.job_id);
       setActiveQueueJob(null);
+      await persistQueueToProject();
       syncUi();
       return;
     }
@@ -765,6 +1204,7 @@ async function cancelQueueItem(queueId) {
 
   if (item.status === "pending") {
     item.status = "cancelled";
+    await persistQueueToProject();
     syncUi();
     return;
   }
@@ -784,6 +1224,7 @@ function clearQueueItems() {
     return;
   }
   queueStore.queuedItems = [];
+  persistQueueToProject().catch(() => {});
   syncUi();
 }
 
@@ -854,6 +1295,80 @@ async function pickAndLoadImage() {
   }
 }
 
+async function suggestMaskForCurrentImage(options = {}) {
+  const queueAfter = Boolean(options.queueAfter);
+
+  if (!jobState.imageSource || !viewState.image) {
+    jobState.error = "Load an image first";
+    syncUi();
+    return;
+  }
+
+  if (!window.backend?.suggestMask) {
+    jobState.error = "Mask suggestion is unavailable in this build.";
+    syncUi();
+    return;
+  }
+
+  try {
+    jobState.error = null;
+    jobState.status = "processing";
+    jobState.progress = { stage: "suggesting_mask", percent: 20, error: null };
+    syncUi();
+
+    const response = await window.backend.suggestMask({
+      image_path: jobState.imageSource,
+      strength: suggestStrength,
+    });
+
+    const maskPath = response?.mask_path;
+    if (!maskPath) {
+      throw new Error("Mask suggestion did not return a mask path.");
+    }
+
+    jobState.progress = { stage: "suggesting_mask", percent: 85, error: null };
+    syncUi();
+
+    await loadMaskIntoCanvas(maskPath, suggestedMaskCanvas, suggestedMaskCtx);
+    suggestedMaskState.available = true;
+    suggestedMaskState.imagePath = jobState.imageSource;
+    suggestedMaskState.maskPath = maskPath;
+    previewSuggestedMask = true;
+    await persistProjectAutoMaskSettings();
+
+    let persistedMaskPath = maskPath;
+
+    if (queueAfter) {
+      await applySuggestedMaskToEditor({ persist: false });
+      persistedMaskPath = jobState.maskSource || maskPath;
+
+      if (projectState.project && window.projects?.saveMask) {
+        const dataUrl = maskCanvas.toDataURL("image/png");
+        persistedMaskPath = await window.projects.saveMask(jobState.imageSource, dataUrl);
+        await persistCurrentMaskToProject();
+      }
+
+      jobState.progress = { stage: "queuing", percent: 92, error: null };
+      syncUi();
+      queueStore.queuedItems.push(createQueueItem({
+        imagePath: jobState.imageSource,
+        maskPath: persistedMaskPath,
+        device: selectedDevice,
+      }));
+      await persistQueueToProject();
+    }
+
+    jobState.status = "ready";
+    jobState.progress = { stage: "ready", percent: 0, error: null };
+    syncUi();
+  } catch (error) {
+    jobState.status = "error";
+    jobState.error = `Mask suggestion failed: ${error?.message || error}`;
+    setOutputState("error");
+    syncUi();
+  }
+}
+
 canvas.addEventListener("pointerdown", (event) => {
   if (!viewState.image) {
     return;
@@ -906,11 +1421,13 @@ canvas.addEventListener("pointermove", (event) => {
 canvas.addEventListener("pointerup", () => {
   viewState.isDrawing = false;
   viewState.isPanning = false;
+  persistCurrentMaskToProject().catch(() => {});
 });
 
 canvas.addEventListener("pointerleave", () => {
   viewState.isDrawing = false;
   viewState.isPanning = false;
+  persistCurrentMaskToProject().catch(() => {});
 });
 
 canvas.addEventListener("wheel", (event) => {
@@ -970,6 +1487,20 @@ brushSizeInput.addEventListener("input", () => {
   syncUi();
 });
 
+if (suggestStrengthInput) {
+  suggestStrengthInput.addEventListener("input", () => {
+    suggestStrength = Math.max(1, Math.min(100, Number(suggestStrengthInput.value) || 50));
+    const matchedPreset = Object.entries(SUGGEST_PRESET_STRENGTH)
+      .find(([, value]) => value === suggestStrength)?.[0];
+    suggestPreset = matchedPreset || "medium";
+    syncUi();
+  });
+
+  suggestStrengthInput.addEventListener("change", () => {
+    persistProjectAutoMaskSettings().catch(() => {});
+  });
+}
+
 zoomSlider.addEventListener("input", () => {
   viewState.zoom = Number(zoomSlider.value) / 100;
   syncUi();
@@ -986,6 +1517,7 @@ clearMaskBtn.addEventListener("click", () => {
   jobState.error = null;
   render();
   syncUi();
+  persistCurrentMaskToProject().catch(() => {});
 });
 
 resetViewBtn.addEventListener("click", () => {
@@ -996,6 +1528,47 @@ resetViewBtn.addEventListener("click", () => {
 openImageBtn.addEventListener("click", async () => {
   await pickAndLoadImage();
 });
+
+if (suggestMaskBtn) {
+  suggestMaskBtn.addEventListener("click", async () => {
+    await suggestMaskForCurrentImage();
+  });
+}
+
+if (suggestQueueBtn) {
+  suggestQueueBtn.addEventListener("click", async () => {
+    await suggestMaskForCurrentImage({ queueAfter: true });
+  });
+}
+
+if (toggleSuggestPreviewBtn) {
+  toggleSuggestPreviewBtn.addEventListener("click", () => {
+    if (!hasSuggestedMaskPreview()) {
+      return;
+    }
+    previewSuggestedMask = !previewSuggestedMask;
+    persistProjectAutoMaskSettings().catch(() => {});
+    render();
+    syncUi();
+  });
+}
+
+if (applySuggestedMaskBtn) {
+  applySuggestedMaskBtn.addEventListener("click", async () => {
+    await applySuggestedMaskToEditor();
+    syncUi();
+  });
+}
+
+if (suggestPresetLowBtn) {
+  suggestPresetLowBtn.addEventListener("click", () => setSuggestPreset("low"));
+}
+if (suggestPresetMediumBtn) {
+  suggestPresetMediumBtn.addEventListener("click", () => setSuggestPreset("medium"));
+}
+if (suggestPresetHighBtn) {
+  suggestPresetHighBtn.addEventListener("click", () => setSuggestPreset("high"));
+}
 
 removeBtn.addEventListener("click", async () => {
   await removeWatermark();
@@ -1084,10 +1657,77 @@ if (queueList) {
 
     if (action === "remove") {
       queueStore.queuedItems = queueStore.queuedItems.filter((item) => item.id !== queueId);
+      persistQueueToProject().catch(() => {});
       syncUi();
     }
   });
 }
+
+if (openProjectBtn) {
+  openProjectBtn.addEventListener("click", async () => {
+    try {
+      await openProjectFolderFlow();
+    } catch (error) {
+      jobState.error = `Project open failed: ${error?.message || error}`;
+      syncUi();
+    }
+  });
+}
+
+if (projectImageList) {
+  projectImageList.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const button = target.closest("[data-project-image]");
+    if (!button) {
+      return;
+    }
+    const imagePath = button.getAttribute("data-project-image");
+    if (!imagePath) {
+      return;
+    }
+
+    const clickedStatus = target.closest(".project-image-status");
+    try {
+      await selectProjectImage(imagePath);
+
+      if (clickedStatus) {
+        const history = projectImageHistory(imagePath);
+        if (history?.outputPath) {
+          jobState.output = history.outputPath;
+          jobState.status = "completed";
+          jobState.error = null;
+          paintOutput(history.outputPath);
+          syncUi();
+        }
+      }
+    } catch (error) {
+      jobState.error = `Failed to load project image: ${error?.message || error}`;
+      syncUi();
+    }
+  });
+}
+
+window.addEventListener("keydown", async (event) => {
+  const tagName = String(event.target?.tagName || "").toLowerCase();
+  if (tagName === "input" || tagName === "textarea" || event.target?.isContentEditable) {
+    return;
+  }
+  if (!projectState.project?.images?.length) {
+    return;
+  }
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    await selectAdjacentProjectImage(-1);
+  }
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    await selectAdjacentProjectImage(1);
+  }
+});
 
 window.backend.onStatusChanged((status) => {
   setBackendStatus(status);
@@ -1189,6 +1829,17 @@ if (themeToggleBtn) {
   syncUi();
 
   try {
+    if (window.projects?.getActive) {
+      projectState.project = await window.projects.getActive();
+      applyProjectSettingsToUi();
+      await restoreQueueFromProject();
+      renderProjectImages();
+      if (projectState.project?.activeImagePath) {
+        await selectProjectImage(projectState.project.activeImagePath);
+      }
+      syncUi();
+    }
+
     await refreshQueueSnapshot();
     const status = await window.backend.getStatus();
     setBackendStatus(status);

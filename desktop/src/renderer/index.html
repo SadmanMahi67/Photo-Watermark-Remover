@@ -124,6 +124,193 @@
             align-items: center;
         }
 
+        .preset-row {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .preset-row button {
+            min-width: 68px;
+        }
+
+        .project-panel {
+            border-top: 1px solid var(--line);
+            border-bottom: 1px solid var(--line);
+            padding: 10px 16px;
+            background: #f8fbfd;
+        }
+
+        [data-theme="dark"] .project-panel {
+            background: #1a1a1a;
+        }
+
+        .project-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .project-title {
+            margin: 0;
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--subtle);
+        }
+
+        .project-path {
+            margin: 0;
+            font-size: 11px;
+            color: var(--subtle);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 100%;
+        }
+
+        .project-images {
+            margin: 8px 0 0;
+            padding: 0;
+            list-style: none;
+            display: flex;
+            gap: 8px;
+            overflow: auto;
+        }
+
+        .project-image-btn {
+            border: 1px solid var(--line);
+            background: var(--panel);
+            color: var(--ink);
+            border-radius: 9px;
+            padding: 4px;
+            min-width: 74px;
+            cursor: pointer;
+            text-align: center;
+        }
+
+        [data-theme="dark"] .project-image-btn {
+            background: #242424;
+        }
+
+        .project-image-btn.active {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 1px rgba(57, 164, 153, 0.2);
+        }
+
+        .project-image-btn.has-output {
+            box-shadow: 0 0 0 1px rgba(21, 128, 61, 0.18);
+        }
+
+        [data-theme="dark"] .project-image-btn.has-output {
+            box-shadow: 0 0 0 1px rgba(134, 239, 172, 0.22);
+        }
+
+        .project-image-thumb {
+            width: 64px;
+            height: 46px;
+            border-radius: 6px;
+            object-fit: cover;
+            border: 1px solid var(--line);
+            background: #dfe7ef;
+            display: block;
+            margin: 0 auto 3px;
+        }
+
+        [data-theme="dark"] .project-image-thumb {
+            background: #2a2a2a;
+            border-color: #3a3a3a;
+        }
+
+        .project-image-name {
+            font-size: 10px;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 64px;
+            margin: 0 auto;
+        }
+
+        .project-image-status {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-top: 3px;
+            padding: 1px 6px;
+            border-radius: 999px;
+            font-size: 9px;
+            font-weight: 700;
+            line-height: 1.4;
+            border: 1px solid transparent;
+            max-width: 64px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            cursor: pointer;
+        }
+
+        .project-image-status.pending {
+            background: #eef2ff;
+            color: #4f46e5;
+            border-color: #c7d2fe;
+        }
+
+        .project-image-status.processing {
+            background: #e0f2fe;
+            color: #0369a1;
+            border-color: #bae6fd;
+        }
+
+        .project-image-status.completed {
+            background: #dcfce7;
+            color: #15803d;
+            border-color: #bbf7d0;
+        }
+
+        .project-image-status.failed {
+            background: #fee2e2;
+            color: #b91c1c;
+            border-color: #fecaca;
+        }
+
+        .project-image-status.cancelled {
+            background: #f3f4f6;
+            color: #4b5563;
+            border-color: #d1d5db;
+        }
+
+        [data-theme="dark"] .project-image-status.pending {
+            background: #1f2937;
+            color: #c7d2fe;
+            border-color: #374151;
+        }
+
+        [data-theme="dark"] .project-image-status.processing {
+            background: #0f2f3c;
+            color: #7dd3fc;
+            border-color: #164e63;
+        }
+
+        [data-theme="dark"] .project-image-status.completed {
+            background: #12311f;
+            color: #86efac;
+            border-color: #14532d;
+        }
+
+        [data-theme="dark"] .project-image-status.failed {
+            background: #3a2222;
+            color: #fca5a5;
+            border-color: #5b2626;
+        }
+
+        [data-theme="dark"] .project-image-status.cancelled {
+            background: #2b2b2b;
+            color: #cbd5e1;
+            border-color: #404040;
+        }
+
         .queue-panel {
             border-top: 1px solid var(--line);
             border-bottom: 1px solid var(--line);
@@ -667,6 +854,17 @@
                 </div>
             </header>
 
+            <section class="project-panel">
+                <div class="project-header">
+                    <p class="project-title">Project</p>
+                    <button id="openProjectBtn" type="button">Open Folder Project</button>
+                </div>
+                <p id="projectPathText" class="project-path">No project folder opened.</p>
+                <ul id="projectImageList" class="project-images">
+                    <li class="empty-note">Open a folder to start a project.</li>
+                </ul>
+            </section>
+
             <div class="controls">
                 <label class="control">
                     Brush size <span id="brushSizeLabel">40px</span>
@@ -686,10 +884,28 @@
                     <span id="deviceNote" class="device-note"></span>
                 </label>
 
+                <label class="control">
+                    AI Suggest Strength <span id="suggestStrengthLabel">50%</span>
+                    <input id="suggestStrength" type="range" min="1" max="100" step="1" value="50" />
+                </label>
+
+                <div class="control">
+                    Suggest Preset
+                    <div class="preset-row">
+                        <button id="suggestPresetLow" type="button">Low</button>
+                        <button id="suggestPresetMedium" type="button">Medium</button>
+                        <button id="suggestPresetHigh" type="button">High</button>
+                    </div>
+                </div>
+
                 <div class="control">
                     Actions
                     <div class="toolbar">
                         <button id="openImageBtn" type="button">Open Image</button>
+                        <button id="suggestMaskBtn" type="button">AI Suggest Mask</button>
+                        <button id="suggestQueueBtn" type="button">Suggest + Queue</button>
+                        <button id="toggleSuggestPreviewBtn" type="button">Preview Suggested: Off</button>
+                        <button id="applySuggestedMaskBtn" type="button">Apply Suggested Mask</button>
                         <button id="eraserBtn" type="button">Eraser Off</button>
                         <button id="clearMaskBtn" type="button">Clear Mask</button>
                         <button id="resetViewBtn" type="button">Reset View</button>

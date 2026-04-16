@@ -12,6 +12,131 @@ let updateAvailableInfo = null;
 let updateDownloadedInfo = null;
 let updateDownloadInFlight = false;
 let updateInstallAccepted = false;
+let activeProject = null;
+
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg"]);
+
+function normalizePath(inputPath) {
+  return path.resolve(inputPath || "");
+}
+
+function projectIdForFolder(folderPath) {
+  return crypto.createHash("sha1").update(normalizePath(folderPath).toLowerCase()).digest("hex").slice(0, 16);
+}
+
+function projectsRootDir() {
+  const root = path.join(app.getPath("userData"), "projects");
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+function projectDirForId(projectId) {
+  const dir = path.join(projectsRootDir(), projectId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(path.join(dir, "masks"), { recursive: true });
+  return dir;
+}
+
+function projectFilePath(projectId) {
+  return path.join(projectDirForId(projectId), "project.json");
+}
+
+function listImagesInFolder(folderPath) {
+  const folder = normalizePath(folderPath);
+  if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) {
+    return [];
+  }
+
+  return fs.readdirSync(folder)
+    .map((name) => path.join(folder, name))
+    .filter((fullPath) => {
+      if (!fs.existsSync(fullPath)) {
+        return false;
+      }
+      const stat = fs.statSync(fullPath);
+      if (!stat.isFile()) {
+        return false;
+      }
+      const ext = path.extname(fullPath).toLowerCase();
+      return IMAGE_EXTENSIONS.has(ext);
+    })
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+}
+
+function readProject(projectId) {
+  const filePath = projectFilePath(projectId);
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeProject(projectData) {
+  const next = {
+    ...projectData,
+    updatedAt: Date.now(),
+  };
+  fs.writeFileSync(projectFilePath(next.id), JSON.stringify(next, null, 2), "utf8");
+  return next;
+}
+
+function serializeProject(projectData) {
+  if (!projectData) {
+    return null;
+  }
+  return {
+    id: projectData.id,
+    folderPath: projectData.folderPath,
+    images: projectData.images,
+    activeImagePath: projectData.activeImagePath,
+    masks: projectData.masks || {},
+    jobHistory: projectData.jobHistory || {},
+    queueItems: projectData.queueItems || [],
+    settings: projectData.settings || {},
+    createdAt: projectData.createdAt,
+    updatedAt: projectData.updatedAt,
+  };
+}
+
+function openOrCreateProject(folderPath) {
+  const normalizedFolder = normalizePath(folderPath);
+  if (!fs.existsSync(normalizedFolder) || !fs.statSync(normalizedFolder).isDirectory()) {
+    throw new Error(`Project folder not found: ${normalizedFolder}`);
+  }
+
+  const projectId = projectIdForFolder(normalizedFolder);
+  const existing = readProject(projectId);
+  const images = listImagesInFolder(normalizedFolder);
+
+  const next = {
+    id: projectId,
+    folderPath: normalizedFolder,
+    images,
+    activeImagePath: existing?.activeImagePath && images.includes(existing.activeImagePath)
+      ? existing.activeImagePath
+      : (images[0] || null),
+    masks: existing?.masks || {},
+    jobHistory: existing?.jobHistory || {},
+    queueItems: Array.isArray(existing?.queueItems) ? existing.queueItems : [],
+    settings: existing?.settings || {},
+    createdAt: existing?.createdAt || Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  activeProject = writeProject(next);
+  return serializeProject(activeProject);
+}
+
+function assertActiveProject() {
+  if (!activeProject) {
+    throw new Error("No active project. Open a project folder first.");
+  }
+}
 
 function emitUpdaterEvent(channel, payload = {}) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -200,7 +325,132 @@ ipcMain.handle("backend:pick-image", async () => {
   }
   return result.filePaths[0];
 });
+ipcMain.handle("project:pick-folder", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Open Project Folder",
+    properties: ["openDirectory"],
+  });
+
+  if (result.canceled || !result.filePaths[0]) {
+    return null;
+  }
+
+  return result.filePaths[0];
+});
+ipcMain.handle("project:open-folder", async (_event, folderPath) => {
+  if (!folderPath) {
+    throw new Error("Project folder path is required.");
+  }
+  return openOrCreateProject(folderPath);
+});
+ipcMain.handle("project:get-active", async () => serializeProject(activeProject));
+ipcMain.handle("project:select-image", async (_event, imagePath) => {
+  assertActiveProject();
+  if (!imagePath || !activeProject.images.includes(imagePath)) {
+    throw new Error("Image does not belong to active project.");
+  }
+  activeProject.activeImagePath = imagePath;
+  activeProject = writeProject(activeProject);
+  return serializeProject(activeProject);
+});
+ipcMain.handle("project:get-mask-path", async (_event, imagePath) => {
+  assertActiveProject();
+  const maskPath = activeProject.masks?.[imagePath] || null;
+  if (maskPath && fs.existsSync(maskPath)) {
+    return maskPath;
+  }
+  return null;
+});
+ipcMain.handle("project:save-mask", async (_event, imagePath, dataUrl) => {
+  assertActiveProject();
+  if (!imagePath || !activeProject.images.includes(imagePath)) {
+    throw new Error("Image does not belong to active project.");
+  }
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/png;base64,")) {
+    throw new Error("Invalid mask payload. Expected PNG data URL.");
+  }
+
+  const base64 = dataUrl.slice("data:image/png;base64,".length);
+  const fileId = crypto.createHash("sha1").update(imagePath.toLowerCase()).digest("hex").slice(0, 16);
+  const outPath = path.join(projectDirForId(activeProject.id), "masks", `${fileId}.png`);
+  fs.writeFileSync(outPath, Buffer.from(base64, "base64"));
+
+  activeProject.masks = activeProject.masks || {};
+  activeProject.masks[imagePath] = outPath;
+  activeProject = writeProject(activeProject);
+  return outPath;
+});
+ipcMain.handle("project:update-job-history", async (_event, payload) => {
+  assertActiveProject();
+  const imagePath = payload?.imagePath;
+  if (!imagePath || !activeProject.images.includes(imagePath)) {
+    return serializeProject(activeProject);
+  }
+
+  activeProject.jobHistory = activeProject.jobHistory || {};
+  activeProject.jobHistory[imagePath] = {
+    status: payload?.status || "unknown",
+    outputPath: payload?.outputPath || null,
+    jobId: payload?.jobId || null,
+    updatedAt: Date.now(),
+  };
+  activeProject = writeProject(activeProject);
+  return serializeProject(activeProject);
+});
+ipcMain.handle("project:get-queue", async () => {
+  assertActiveProject();
+  return Array.isArray(activeProject.queueItems) ? activeProject.queueItems : [];
+});
+ipcMain.handle("project:set-queue", async (_event, queueItems) => {
+  assertActiveProject();
+  const nextItems = Array.isArray(queueItems) ? queueItems : [];
+
+  activeProject.queueItems = nextItems.filter((item) => {
+    const imagePath = item?.imagePath;
+    const maskPath = item?.maskPath;
+    if (!imagePath || !activeProject.images.includes(imagePath)) {
+      return false;
+    }
+    if (!maskPath || !fs.existsSync(maskPath)) {
+      return false;
+    }
+    return true;
+  }).map((item) => ({
+    id: String(item.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`),
+    imagePath: item.imagePath,
+    maskPath: item.maskPath,
+    device: item.device || "cpu",
+    status: item.status || "pending",
+    progress: item.progress || { stage: "pending", percent: 0, error: null },
+    backendJobId: item.backendJobId || null,
+    outputPath: item.outputPath || null,
+    error: item.error || null,
+    createdAt: Number(item.createdAt || Date.now()),
+  }));
+
+  activeProject = writeProject(activeProject);
+  return activeProject.queueItems;
+});
+ipcMain.handle("project:update-settings", async (_event, settingsPatch) => {
+  assertActiveProject();
+  const patch = settingsPatch && typeof settingsPatch === "object" ? settingsPatch : {};
+  const nextSettings = {
+    ...(activeProject.settings || {}),
+    ...patch,
+  };
+  if (patch.autoMask && typeof patch.autoMask === "object") {
+    nextSettings.autoMask = {
+      ...((activeProject.settings && activeProject.settings.autoMask) || {}),
+      ...patch.autoMask,
+    };
+  }
+
+  activeProject.settings = nextSettings;
+  activeProject = writeProject(activeProject);
+  return serializeProject(activeProject);
+});
 ipcMain.handle("backend:start-inpaint", async (_event, payload) => backend.startInpaint(payload));
+ipcMain.handle("backend:suggest-mask", async (_event, payload) => backend.suggestMask(payload));
 ipcMain.handle("backend:get-job", async (_event, jobId) => backend.getJob(jobId));
 ipcMain.handle("backend:get-jobs", async () => backend.getJobs());
 ipcMain.handle("backend:cancel-job", async (_event, jobId) => backend.cancelJob(jobId));
