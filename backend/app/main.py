@@ -142,8 +142,23 @@ def auto_remove_tmp_paths(image_path: Path) -> tuple[Path, Path]:
 
 
 def florence_model_dir_path() -> Path:
-    model_dir = Path(os.getenv("FLORENCE2_MODEL_DIR", str(model_dir_path() / "florence2"))).resolve()
-    return model_dir
+    env_value = os.getenv("FLORENCE2_MODEL_DIR")
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+
+    base_model_dir = model_dir_path()
+    candidates = [
+        base_model_dir / "florence2",
+        Path.cwd() / "models" / "florence2",
+        Path.cwd().parent / "models" / "florence2",
+        Path.cwd().parent / "models" / "huggingface" / "florence2",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_dir():
+            return candidate.resolve()
+
+    return (base_model_dir / "florence2").resolve()
 
 
 def load_florence2_components():
@@ -199,7 +214,8 @@ def detect_boxes_florence(image_path: Path, requested_device: Literal["cpu", "cu
         rgb = src.convert("RGB")
         width, height = rgb.size
 
-    prompt = "<OD> watermark logo text overlay"
+    # Florence-2 requires the task token to be the full text for OD.
+    prompt = "<OD>"
     inputs = processor(text=prompt, images=rgb, return_tensors="pt")
     for key, value in list(inputs.items()):
         if hasattr(value, "to"):
@@ -230,16 +246,16 @@ def detect_boxes_florence(image_path: Path, requested_device: Literal["cpu", "cu
         y0 = min(y0, height - 1)
         x1 = max(x0 + 1, min(x1, width))
         y1 = max(y0 + 1, min(y1, height))
-        label = str(labels[i]).lower() if i < len(labels) else "watermark"
-        if not any(token in label for token in ["watermark", "logo", "text", "stamp"]):
-            continue
+        label = str(labels[i]).lower() if i < len(labels) else ""
+        label_is_watermarkish = any(token in label for token in ["watermark", "logo", "text", "stamp"])
+        confidence = 0.74 if label_is_watermarkish else 0.46
         results.append(
             DetectionBox(
                 x=x0,
                 y=y0,
                 width=x1 - x0,
                 height=y1 - y0,
-                confidence=0.70,
+                confidence=confidence,
                 kind="watermark",
             )
         )
@@ -681,10 +697,24 @@ def auto_remove(req: AutoRemoveRequest) -> AutoRemoveResponse:
     if not image.exists() or not image.is_file():
         raise HTTPException(status_code=400, detail=f"image_path does not exist: {image}")
 
+    detector = "florence2-lama"
     try:
         boxes = detect_boxes_florence(image, req.device)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"auto detect failed: {exc}") from exc
+    except Exception:
+        # Fallback keeps one-click remove usable when Florence-2 files are not present yet.
+        boxes = []
+
+    if not boxes:
+        mask_path, (width, height) = suggest_mask_file(image, None, strength=58)
+        boxes, _masked_area = detect_boxes_from_mask(
+            mask_path=mask_path,
+            width=width,
+            height=height,
+            min_area_ratio=0.0005,
+            min_confidence=0.10,
+            max_detections=24,
+        )
+        detector = "stub.edge-brightness-v1-fallback-lama"
 
     if not boxes:
         raise HTTPException(status_code=422, detail="no watermark detected")
@@ -711,7 +741,7 @@ def auto_remove(req: AutoRemoveRequest) -> AutoRemoveResponse:
     return AutoRemoveResponse(
         output_path=str(resolved_output),
         mask_path=str(mask_path),
-        detector="florence2-lama",
+        detector=detector,
         detections=len(boxes),
         device=req.device,
     )
