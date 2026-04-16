@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld("backend", {
   getDevices: () => ipcRenderer.invoke("backend:get-devices"),
   pickImage: () => ipcRenderer.invoke("backend:pick-image"),
   suggestMask: (payload) => ipcRenderer.invoke("backend:suggest-mask", payload),
+  detectMask: (payload) => ipcRenderer.invoke("backend:detect-mask", payload),
+  autoRemove: (payload) => ipcRenderer.invoke("backend:auto-remove", payload),
   startInpaint: (payload) => ipcRenderer.invoke("backend:start-inpaint", payload),
   getJob: (jobId) => ipcRenderer.invoke("backend:get-job", jobId),
   getJobs: () => ipcRenderer.invoke("backend:get-jobs"),

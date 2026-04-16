@@ -417,6 +417,14 @@ class BackendManager extends EventEmitter {
     return this.requestJson("POST", "/mask/suggest", payload);
   }
 
+  async detectMask(payload) {
+    return this.requestJson("POST", "/mask/detect", payload);
+  }
+
+  async autoRemove(payload) {
+    return this.requestJson("POST", "/auto-remove", payload);
+  }
+
   async getJob(jobId) {
     return this.requestJson("GET", `/jobs/${jobId}`);
   }
@@ -487,7 +495,8 @@ class BackendManager extends EventEmitter {
         }
 
         try {
-          const parsed = JSON.parse(out.trim());
+          const cleaned = out.trim().split(/\r?\n/).filter((line) => line.trim().startsWith("{")).pop() || out.trim();
+          const parsed = JSON.parse(cleaned);
           const runtime = parsed.runtime || {};
           this.emit("log", {
             level: "info",

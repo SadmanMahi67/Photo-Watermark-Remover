@@ -67,6 +67,47 @@ class SuggestMaskResponse(BaseModel):
     method: str
 
 
+class DetectionBox(BaseModel):
+    x: int
+    y: int
+    width: int
+    height: int
+    confidence: float = Field(ge=0.0, le=1.0)
+    kind: Literal["watermark"] = "watermark"
+
+
+class DetectMaskRequest(BaseModel):
+    image_path: str
+    output_path: Optional[str] = None
+    strength: int = Field(default=50, ge=1, le=100)
+    min_area_ratio: float = Field(default=0.0005, ge=0.0, le=1.0)
+    min_confidence: float = Field(default=0.12, ge=0.0, le=1.0)
+    max_detections: int = Field(default=24, ge=1, le=200)
+
+
+class DetectMaskResponse(BaseModel):
+    mask_path: str
+    width: int
+    height: int
+    detector: str
+    detections: List[DetectionBox]
+    masked_area_ratio: float = Field(ge=0.0, le=1.0)
+
+
+class AutoRemoveRequest(BaseModel):
+    image_path: str
+    output_path: Optional[str] = None
+    device: Literal["cpu", "cuda", "mps"] = "cpu"
+
+
+class AutoRemoveResponse(BaseModel):
+    output_path: str
+    mask_path: str
+    detector: str
+    detections: int
+    device: Literal["cpu", "cuda", "mps"]
+
+
 @dataclass
 class Job:
     job_id: str
@@ -86,6 +127,140 @@ app = FastAPI(title="Watermark Remover Backend", version="0.1.0")
 warmup_lock = threading.Lock()
 warmup_status: Literal["idle", "warming", "ready", "failed"] = "idle"
 warmup_progress = ProgressEvent(stage="idle", percent=0, error=None)
+florence_lock = threading.Lock()
+florence_processor = None
+florence_model = None
+
+
+def auto_remove_tmp_paths(image_path: Path) -> tuple[Path, Path]:
+    root = Path.cwd() / "tmp" / "auto_remove"
+    root.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex[:10]
+    mask_path = root / f"{image_path.stem}_auto_mask_{token}.png"
+    output_path = root / f"{image_path.stem}_auto_output_{token}{image_path.suffix or '.png'}"
+    return mask_path, output_path
+
+
+def florence_model_dir_path() -> Path:
+    model_dir = Path(os.getenv("FLORENCE2_MODEL_DIR", str(model_dir_path() / "florence2"))).resolve()
+    return model_dir
+
+
+def load_florence2_components():
+    global florence_processor, florence_model
+    with florence_lock:
+        if florence_processor is not None and florence_model is not None:
+            return florence_processor, florence_model
+
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoProcessor
+        except Exception as exc:
+            raise RuntimeError(f"required detector dependencies are missing: {exc}") from exc
+
+        model_dir = florence_model_dir_path()
+        if not model_dir.exists():
+            raise FileNotFoundError(
+                f"Florence-2 model directory not found: {model_dir}. Set FLORENCE2_MODEL_DIR to a local model path."
+            )
+
+        florence_processor = AutoProcessor.from_pretrained(
+            str(model_dir),
+            local_files_only=True,
+            trust_remote_code=True,
+        )
+        florence_model = AutoModelForCausalLM.from_pretrained(
+            str(model_dir),
+            local_files_only=True,
+            trust_remote_code=True,
+        )
+        florence_model.eval()
+        _ = torch  # Keep local import explicit for linters.
+        return florence_processor, florence_model
+
+
+def detect_boxes_florence(image_path: Path, requested_device: Literal["cpu", "cuda", "mps"]) -> List[DetectionBox]:
+    processor, model = load_florence2_components()
+
+    try:
+        import torch
+    except Exception as exc:
+        raise RuntimeError(f"torch is unavailable for Florence-2 inference: {exc}") from exc
+
+    run_device = "cpu"
+    if requested_device == "cuda" and torch.cuda.is_available():
+        run_device = "cuda"
+    elif requested_device == "mps" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        run_device = "mps"
+
+    model = model.to(run_device)
+
+    with Image.open(image_path) as src:
+        rgb = src.convert("RGB")
+        width, height = rgb.size
+
+    prompt = "<OD> watermark logo text overlay"
+    inputs = processor(text=prompt, images=rgb, return_tensors="pt")
+    for key, value in list(inputs.items()):
+        if hasattr(value, "to"):
+            inputs[key] = value.to(run_device)
+
+    with torch.no_grad():
+        generated_ids = model.generate(
+            input_ids=inputs.get("input_ids"),
+            pixel_values=inputs.get("pixel_values"),
+            max_new_tokens=256,
+            num_beams=3,
+            do_sample=False,
+        )
+
+    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+    parsed = processor.post_process_generation(generated_text, task="<OD>", image_size=(width, height))
+
+    od = parsed.get("<OD>") if isinstance(parsed, dict) else None
+    bboxes = od.get("bboxes", []) if isinstance(od, dict) else []
+    labels = od.get("labels", []) if isinstance(od, dict) else []
+
+    results: List[DetectionBox] = []
+    for i, box in enumerate(bboxes):
+        if not isinstance(box, (list, tuple)) or len(box) < 4:
+            continue
+        x0, y0, x1, y1 = [int(max(0, round(float(v)))) for v in box[:4]]
+        x0 = min(x0, width - 1)
+        y0 = min(y0, height - 1)
+        x1 = max(x0 + 1, min(x1, width))
+        y1 = max(y0 + 1, min(y1, height))
+        label = str(labels[i]).lower() if i < len(labels) else "watermark"
+        if not any(token in label for token in ["watermark", "logo", "text", "stamp"]):
+            continue
+        results.append(
+            DetectionBox(
+                x=x0,
+                y=y0,
+                width=x1 - x0,
+                height=y1 - y0,
+                confidence=0.70,
+                kind="watermark",
+            )
+        )
+
+    return results
+
+
+def write_mask_from_boxes(mask_path: Path, width: int, height: int, boxes: List[DetectionBox]) -> None:
+    mask = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+
+    pad_x = max(2, int(width * 0.006))
+    pad_y = max(2, int(height * 0.006))
+    for box in boxes:
+        x0 = max(0, box.x - pad_x)
+        y0 = max(0, box.y - pad_y)
+        x1 = min(width, box.x + box.width + pad_x)
+        y1 = min(height, box.y + box.height + pad_y)
+        draw.rectangle([(x0, y0), (x1, y1)], fill=255)
+
+    mask.save(mask_path, format="PNG")
 
 
 def push_progress(job: Job, stage: str, percent: int, error: Optional[str] = None) -> None:
@@ -152,6 +327,109 @@ def suggest_mask_file(image_path: Path, requested_output: Optional[str], strengt
 
         mask.save(out_path, format="PNG")
         return out_path, rgb.size
+
+
+def detect_boxes_from_mask(
+    mask_path: Path,
+    width: int,
+    height: int,
+    min_area_ratio: float,
+    min_confidence: float,
+    max_detections: int,
+) -> tuple[List[DetectionBox], float]:
+    with Image.open(mask_path) as mask_img:
+        gray_mask = mask_img.convert("L")
+        data = [1 if p > 0 else 0 for p in gray_mask.getdata()]
+
+    total = max(1, width * height)
+    non_zero = sum(data)
+    area_ratio = float(non_zero) / float(total)
+    if non_zero == 0:
+        return [], area_ratio
+
+    visited = bytearray(len(data))
+    detections: List[DetectionBox] = []
+
+    for idx, value in enumerate(data):
+        if value == 0 or visited[idx]:
+            continue
+
+        stack = [idx]
+        visited[idx] = 1
+        min_x = width
+        min_y = height
+        max_x = 0
+        max_y = 0
+        pixels = 0
+
+        while stack:
+            current = stack.pop()
+            if data[current] == 0:
+                continue
+
+            x = current % width
+            y = current // width
+            pixels += 1
+
+            if x < min_x:
+                min_x = x
+            if y < min_y:
+                min_y = y
+            if x > max_x:
+                max_x = x
+            if y > max_y:
+                max_y = y
+
+            if x > 0:
+                left = current - 1
+                if not visited[left] and data[left] == 1:
+                    visited[left] = 1
+                    stack.append(left)
+            if x < (width - 1):
+                right = current + 1
+                if not visited[right] and data[right] == 1:
+                    visited[right] = 1
+                    stack.append(right)
+            if y > 0:
+                up = current - width
+                if not visited[up] and data[up] == 1:
+                    visited[up] = 1
+                    stack.append(up)
+            if y < (height - 1):
+                down = current + width
+                if not visited[down] and data[down] == 1:
+                    visited[down] = 1
+                    stack.append(down)
+
+        comp_area_ratio = float(pixels) / float(total)
+        if comp_area_ratio < float(min_area_ratio):
+            continue
+
+        box_width = max(1, (max_x - min_x) + 1)
+        box_height = max(1, (max_y - min_y) + 1)
+        box_pixels = box_width * box_height
+        box_area_ratio = float(box_pixels) / float(total)
+        density = float(pixels) / float(max(1, box_pixels))
+
+        # Confidence heuristic favors dense, compact components over giant low-density blobs.
+        confidence = 0.12 + (0.52 * density) + (0.36 * (1.0 - min(1.0, box_area_ratio * 6.0)))
+        confidence = max(0.01, min(0.99, confidence))
+        if confidence < float(min_confidence):
+            continue
+
+        detections.append(
+            DetectionBox(
+                x=int(min_x),
+                y=int(min_y),
+                width=int(box_width),
+                height=int(box_height),
+                confidence=float(confidence),
+                kind="watermark",
+            )
+        )
+
+    detections.sort(key=lambda d: (d.confidence, d.width * d.height), reverse=True)
+    return detections[: int(max_detections)], area_ratio
 
 
 def model_dir_path() -> Path:
@@ -365,6 +643,77 @@ def suggest_mask(req: SuggestMaskRequest) -> SuggestMaskResponse:
         width=width,
         height=height,
         method="edge-brightness-v1",
+    )
+
+
+@app.post("/mask/detect", response_model=DetectMaskResponse)
+def detect_mask(req: DetectMaskRequest) -> DetectMaskResponse:
+    image = Path(req.image_path).expanduser().resolve()
+
+    try:
+        mask_path, (width, height) = suggest_mask_file(image, req.output_path, req.strength)
+        detections, masked_area_ratio = detect_boxes_from_mask(
+            mask_path=mask_path,
+            width=width,
+            height=height,
+            min_area_ratio=req.min_area_ratio,
+            min_confidence=req.min_confidence,
+            max_detections=req.max_detections,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"mask detection failed: {exc}") from exc
+
+    return DetectMaskResponse(
+        mask_path=str(mask_path),
+        width=width,
+        height=height,
+        detector="stub.edge-brightness-v1",
+        detections=detections,
+        masked_area_ratio=float(max(0.0, min(1.0, masked_area_ratio))),
+    )
+
+
+@app.post("/auto-remove", response_model=AutoRemoveResponse)
+def auto_remove(req: AutoRemoveRequest) -> AutoRemoveResponse:
+    image = Path(req.image_path).expanduser().resolve()
+    if not image.exists() or not image.is_file():
+        raise HTTPException(status_code=400, detail=f"image_path does not exist: {image}")
+
+    try:
+        boxes = detect_boxes_florence(image, req.device)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"auto detect failed: {exc}") from exc
+
+    if not boxes:
+        raise HTTPException(status_code=422, detail="no watermark detected")
+
+    mask_path, generated_output = auto_remove_tmp_paths(image)
+    with Image.open(image) as src:
+        width, height = src.size
+    write_mask_from_boxes(mask_path, width, height, boxes)
+
+    output_path = output_path_for(image, req.output_path or str(generated_output))
+    proc = iopaint_run(image, mask_path, output_path, req.device)
+
+    if proc.stdout is not None:
+        for _line in proc.stdout:
+            pass
+    code = proc.wait()
+    if code != 0:
+        raise HTTPException(status_code=500, detail=f"auto remove failed with exit code {code}")
+
+    resolved_output = resolve_generated_output_path(output_path, image)
+    if resolved_output is None:
+        raise HTTPException(status_code=500, detail="auto remove finished but output was not created")
+
+    return AutoRemoveResponse(
+        output_path=str(resolved_output),
+        mask_path=str(mask_path),
+        detector="florence2-lama",
+        detections=len(boxes),
+        device=req.device,
     )
 
 

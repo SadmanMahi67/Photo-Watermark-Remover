@@ -34,6 +34,10 @@ const suggestStrengthLabel = document.getElementById("suggestStrengthLabel");
 const suggestPresetLowBtn = document.getElementById("suggestPresetLow");
 const suggestPresetMediumBtn = document.getElementById("suggestPresetMedium");
 const suggestPresetHighBtn = document.getElementById("suggestPresetHigh");
+const detectionNote = document.getElementById("detectionNote");
+const detectionRegionList = document.getElementById("detectionRegionList");
+const selectAllRegionsBtn = document.getElementById("selectAllRegionsBtn");
+const selectNoneRegionsBtn = document.getElementById("selectNoneRegionsBtn");
 const zoomSlider = document.getElementById("zoomSlider");
 const zoomLabel = document.getElementById("zoomLabel");
 const openImageBtn = document.getElementById("openImageBtn");
@@ -41,6 +45,7 @@ const suggestMaskBtn = document.getElementById("suggestMaskBtn");
 const suggestQueueBtn = document.getElementById("suggestQueueBtn");
 const toggleSuggestPreviewBtn = document.getElementById("toggleSuggestPreviewBtn");
 const applySuggestedMaskBtn = document.getElementById("applySuggestedMaskBtn");
+const autoRemoveBtn = document.getElementById("autoRemoveBtn");
 const eraserBtn = document.getElementById("eraserBtn");
 const clearMaskBtn = document.getElementById("clearMaskBtn");
 const resetViewBtn = document.getElementById("resetViewBtn");
@@ -60,6 +65,8 @@ const maskCanvas = document.createElement("canvas");
 const maskCtx = maskCanvas.getContext("2d");
 const suggestedMaskCanvas = document.createElement("canvas");
 const suggestedMaskCtx = suggestedMaskCanvas.getContext("2d");
+const rawSuggestedMaskCanvas = document.createElement("canvas");
+const rawSuggestedMaskCtx = rawSuggestedMaskCanvas.getContext("2d");
 
 const jobState = {
   imageSource: null,
@@ -105,6 +112,13 @@ const suggestedMaskState = {
   available: false,
   imagePath: null,
   maskPath: null,
+};
+
+const detectState = {
+  detector: null,
+  detections: 0,
+  maskedAreaRatio: 0,
+  regions: [],
 };
 
 const THEME_KEY = "pwr.theme";
@@ -186,6 +200,97 @@ function clearSuggestedMaskPreview() {
   suggestedMaskState.maskPath = null;
   suggestedMaskCanvas.width = 0;
   suggestedMaskCanvas.height = 0;
+  rawSuggestedMaskCanvas.width = 0;
+  rawSuggestedMaskCanvas.height = 0;
+  detectState.detector = null;
+  detectState.detections = 0;
+  detectState.maskedAreaRatio = 0;
+  detectState.regions = [];
+}
+
+function sanitizeRegion(region, width, height) {
+  const x = Math.max(0, Math.min(width - 1, Number(region?.x || 0)));
+  const y = Math.max(0, Math.min(height - 1, Number(region?.y || 0)));
+  const w = Math.max(1, Math.min(width - x, Number(region?.width || 1)));
+  const h = Math.max(1, Math.min(height - y, Number(region?.height || 1)));
+  const confidence = Math.max(0, Math.min(1, Number(region?.confidence || 0)));
+  return {
+    x,
+    y,
+    width: w,
+    height: h,
+    confidence,
+    selected: true,
+  };
+}
+
+function renderDetectionRegions() {
+  if (!detectionRegionList) {
+    return;
+  }
+
+  if (!detectState.regions.length) {
+    detectionRegionList.innerHTML = "";
+    return;
+  }
+
+  const html = detectState.regions.map((region, index) => {
+    const checked = region.selected ? "checked" : "";
+    const confidence = Math.round(region.confidence * 100);
+    return `
+      <li class="detect-region-item">
+        <input type="checkbox" data-detect-region-index="${index}" ${checked} />
+        <span>Region ${index + 1} (${region.width}x${region.height}) ${confidence}%</span>
+      </li>
+    `;
+  }).join("");
+
+  detectionRegionList.innerHTML = html;
+}
+
+function rebuildSuggestedMaskFromSelectedRegions() {
+  if (rawSuggestedMaskCanvas.width === 0 || rawSuggestedMaskCanvas.height === 0) {
+    suggestedMaskCanvas.width = 0;
+    suggestedMaskCanvas.height = 0;
+    return;
+  }
+
+  suggestedMaskCanvas.width = rawSuggestedMaskCanvas.width;
+  suggestedMaskCanvas.height = rawSuggestedMaskCanvas.height;
+  suggestedMaskCtx.clearRect(0, 0, suggestedMaskCanvas.width, suggestedMaskCanvas.height);
+
+  if (!detectState.regions.length) {
+    suggestedMaskCtx.drawImage(rawSuggestedMaskCanvas, 0, 0, suggestedMaskCanvas.width, suggestedMaskCanvas.height);
+    return;
+  }
+
+  for (const region of detectState.regions) {
+    if (!region.selected) {
+      continue;
+    }
+    suggestedMaskCtx.drawImage(
+      rawSuggestedMaskCanvas,
+      region.x,
+      region.y,
+      region.width,
+      region.height,
+      region.x,
+      region.y,
+      region.width,
+      region.height,
+    );
+  }
+}
+
+function setAllDetectionRegions(selected) {
+  if (!detectState.regions.length) {
+    return;
+  }
+  detectState.regions = detectState.regions.map((region) => ({ ...region, selected }));
+  rebuildSuggestedMaskFromSelectedRegions();
+  renderDetectionRegions();
+  render();
+  syncUi();
 }
 
 function updatePresetButtonsUi() {
@@ -403,6 +508,11 @@ async function loadMaskIntoCanvas(maskPath, targetCanvas, targetCtx) {
 async function applySuggestedMaskToEditor(options = {}) {
   const persist = options.persist !== false;
   if (!hasSuggestedMaskPreview()) {
+    return;
+  }
+  if (detectState.regions.length && !detectState.regions.some((region) => region.selected)) {
+    jobState.error = "No detection regions selected. Select at least one region.";
+    syncUi();
     return;
   }
 
@@ -635,6 +745,7 @@ function humanStage(stage) {
     starting_backend_job: "Starting AI removal",
     validating_input: "Validating input",
     loading_model: "Loading model",
+    detecting_watermark: "Detecting watermark",
     suggesting_mask: "Suggesting mask",
     queuing: "Adding to queue",
     inpainting: "Removing watermark",
@@ -666,7 +777,9 @@ function fileUrlFromPath(filePath) {
 
 function syncUi() {
   brushSizeLabel.textContent = `${viewState.brushSize}px`;
-  suggestStrengthLabel.textContent = `${Math.round(suggestStrength)}%`;
+  if (suggestStrengthLabel) {
+    suggestStrengthLabel.textContent = `${Math.round(suggestStrength)}%`;
+  }
   zoomLabel.textContent = `${Math.round(viewState.zoom * 100)}%`;
   eraserBtn.classList.toggle("toggle-on", viewState.eraser);
   eraserBtn.textContent = viewState.eraser ? "Eraser On" : "Eraser Off";
@@ -702,8 +815,9 @@ function syncUi() {
   processAllBtn.disabled = !hasPendingQueueItems() || !backendReady || running || queueBusy;
   clearQueueBtn.disabled = queueBusy || queueStore.queuedItems.length === 0;
   openImageBtn.disabled = running || queueBusy;
-  suggestMaskBtn.disabled = !hasImage || running || queueBusy || !backendReady;
-  suggestQueueBtn.disabled = !hasImage || running || queueBusy || !backendReady;
+  if (suggestMaskBtn) suggestMaskBtn.disabled = !hasImage || running || queueBusy || !backendReady;
+  if (suggestQueueBtn) suggestQueueBtn.disabled = !hasImage || running || queueBusy || !backendReady;
+  if (autoRemoveBtn) autoRemoveBtn.disabled = !hasImage || running || queueBusy || !backendReady;
   if (toggleSuggestPreviewBtn) {
     toggleSuggestPreviewBtn.disabled = !hasSuggestedMaskPreview() || running || queueBusy;
   }
@@ -726,12 +840,30 @@ function syncUi() {
   if (suggestPresetLowBtn) suggestPresetLowBtn.disabled = running || queueBusy;
   if (suggestPresetMediumBtn) suggestPresetMediumBtn.disabled = running || queueBusy;
   if (suggestPresetHighBtn) suggestPresetHighBtn.disabled = running || queueBusy;
+  if (selectAllRegionsBtn) {
+    selectAllRegionsBtn.disabled = running || queueBusy || detectState.regions.length === 0;
+  }
+  if (selectNoneRegionsBtn) {
+    selectNoneRegionsBtn.disabled = running || queueBusy || detectState.regions.length === 0;
+  }
 
   if (toggleSuggestPreviewBtn) {
     toggleSuggestPreviewBtn.textContent = `Preview Suggested: ${previewSuggestedMask ? "On" : "Off"}`;
     toggleSuggestPreviewBtn.classList.toggle("toggle-on", previewSuggestedMask);
   }
   updatePresetButtonsUi();
+
+  if (detectionNote) {
+    if (detectState.detector) {
+      const percent = Math.round(detectState.maskedAreaRatio * 100);
+      const selected = detectState.regions.length
+        ? detectState.regions.filter((region) => region.selected).length
+        : detectState.detections;
+      detectionNote.textContent = `Detector: ${detectState.detector} | Regions: ${selected}/${detectState.detections} | Coverage: ${percent}%`;
+    } else {
+      detectionNote.textContent = "";
+    }
+  }
 
   if (jobState.error) {
     errorNote.style.display = "block";
@@ -745,6 +877,7 @@ function syncUi() {
     ? `Processed in ${lastProcessingSeconds.toFixed(1)}s`
     : "";
   outputZoomLabel.textContent = `${Math.round(outputZoom * 100)}%`;
+  renderDetectionRegions();
   renderQueueList();
 }
 
@@ -1313,23 +1446,59 @@ async function suggestMaskForCurrentImage(options = {}) {
   try {
     jobState.error = null;
     jobState.status = "processing";
-    jobState.progress = { stage: "suggesting_mask", percent: 20, error: null };
+    jobState.progress = { stage: "detecting_watermark", percent: 18, error: null };
     syncUi();
 
-    const response = await window.backend.suggestMask({
-      image_path: jobState.imageSource,
-      strength: suggestStrength,
-    });
+    const detectAvailable = typeof window.backend.detectMask === "function";
+    const response = detectAvailable
+      ? await window.backend.detectMask({
+        image_path: jobState.imageSource,
+        strength: suggestStrength,
+        min_area_ratio: 0.0005,
+        min_confidence: 0.14,
+        max_detections: 24,
+      })
+      : await window.backend.suggestMask({
+        image_path: jobState.imageSource,
+        strength: suggestStrength,
+      });
 
     const maskPath = response?.mask_path;
     if (!maskPath) {
       throw new Error("Mask suggestion did not return a mask path.");
     }
 
+    const rawDetections = Array.isArray(response?.detections) ? response.detections : [];
+    const detectionCount = rawDetections.length;
+    const maskedAreaRatio = Number(response?.masked_area_ratio || 0);
+    detectState.detector = String(response?.detector || (detectAvailable ? "detect" : "suggest"));
+    detectState.detections = detectionCount;
+    detectState.maskedAreaRatio = Math.max(0, Math.min(1, maskedAreaRatio));
+    if (detectAvailable && detectionCount === 0) {
+      clearSuggestedMaskPreview();
+      jobState.status = "ready";
+      jobState.error = "No watermark region detected. Try manual masking or adjust strength.";
+      jobState.progress = { stage: "ready", percent: 0, error: null };
+      render();
+      syncUi();
+      return;
+    }
+    if (detectAvailable && maskedAreaRatio > 0.6) {
+      clearSuggestedMaskPreview();
+      throw new Error(`Detection covered too much area (${Math.round(maskedAreaRatio * 100)}%). Lower strength or mask manually.`);
+    }
+
     jobState.progress = { stage: "suggesting_mask", percent: 85, error: null };
     syncUi();
 
-    await loadMaskIntoCanvas(maskPath, suggestedMaskCanvas, suggestedMaskCtx);
+    await loadMaskIntoCanvas(maskPath, rawSuggestedMaskCanvas, rawSuggestedMaskCtx);
+    if (rawDetections.length > 0) {
+      detectState.regions = rawDetections
+        .map((region) => sanitizeRegion(region, rawSuggestedMaskCanvas.width, rawSuggestedMaskCanvas.height));
+    } else {
+      detectState.regions = [];
+    }
+    rebuildSuggestedMaskFromSelectedRegions();
     suggestedMaskState.available = true;
     suggestedMaskState.imagePath = jobState.imageSource;
     suggestedMaskState.maskPath = maskPath;
@@ -1364,6 +1533,64 @@ async function suggestMaskForCurrentImage(options = {}) {
   } catch (error) {
     jobState.status = "error";
     jobState.error = `Mask suggestion failed: ${error?.message || error}`;
+    setOutputState("error");
+    syncUi();
+  }
+}
+
+async function autoRemoveWatermark() {
+  if (!jobState.imageSource || !viewState.image) {
+    jobState.error = "Load an image first";
+    syncUi();
+    return;
+  }
+
+  if (!window.backend?.autoRemove) {
+    jobState.error = "Auto remove is unavailable in this build.";
+    syncUi();
+    return;
+  }
+
+  try {
+    jobState.error = null;
+    jobState.status = "processing";
+    jobState.progress = { stage: "detecting_watermark", percent: 14, error: null };
+    setOutputState("processing");
+    currentJobStartedAt = performance.now();
+    lastProcessingSeconds = null;
+    syncUi();
+
+    const result = await window.backend.autoRemove({
+      image_path: jobState.imageSource,
+      device: selectedDevice,
+    });
+
+    if (!result?.output_path) {
+      throw new Error("Auto remove did not produce output.");
+    }
+
+    jobState.output = result.output_path;
+    jobState.maskSource = result.mask_path || null;
+    jobState.status = "completed";
+    jobState.progress = { stage: "completed", percent: 100, error: null };
+    if (currentJobStartedAt !== null) {
+      lastProcessingSeconds = (performance.now() - currentJobStartedAt) / 1000;
+    }
+    currentJobStartedAt = null;
+
+    await updateProjectJobHistory(
+      jobState.imageSource,
+      "completed",
+      result.output_path,
+      `auto-${Date.now()}`,
+    );
+
+    paintOutput(result.output_path);
+    syncUi();
+  } catch (error) {
+    currentJobStartedAt = null;
+    jobState.status = "error";
+    jobState.error = `Auto remove failed: ${error?.message || error}`;
     setOutputState("error");
     syncUi();
   }
@@ -1541,6 +1768,12 @@ if (suggestQueueBtn) {
   });
 }
 
+if (autoRemoveBtn) {
+  autoRemoveBtn.addEventListener("click", async () => {
+    await autoRemoveWatermark();
+  });
+}
+
 if (toggleSuggestPreviewBtn) {
   toggleSuggestPreviewBtn.addEventListener("click", () => {
     if (!hasSuggestedMaskPreview()) {
@@ -1568,6 +1801,38 @@ if (suggestPresetMediumBtn) {
 }
 if (suggestPresetHighBtn) {
   suggestPresetHighBtn.addEventListener("click", () => setSuggestPreset("high"));
+}
+
+if (detectionRegionList) {
+  detectionRegionList.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) {
+      return;
+    }
+    const rawIndex = target.getAttribute("data-detect-region-index");
+    if (rawIndex === null) {
+      return;
+    }
+    const index = Number(rawIndex);
+    if (!Number.isFinite(index) || !detectState.regions[index]) {
+      return;
+    }
+    detectState.regions[index] = {
+      ...detectState.regions[index],
+      selected: Boolean(target.checked),
+    };
+    rebuildSuggestedMaskFromSelectedRegions();
+    render();
+    syncUi();
+  });
+}
+
+if (selectAllRegionsBtn) {
+  selectAllRegionsBtn.addEventListener("click", () => setAllDetectionRegions(true));
+}
+
+if (selectNoneRegionsBtn) {
+  selectNoneRegionsBtn.addEventListener("click", () => setAllDetectionRegions(false));
 }
 
 removeBtn.addEventListener("click", async () => {

@@ -451,6 +451,8 @@ ipcMain.handle("project:update-settings", async (_event, settingsPatch) => {
 });
 ipcMain.handle("backend:start-inpaint", async (_event, payload) => backend.startInpaint(payload));
 ipcMain.handle("backend:suggest-mask", async (_event, payload) => backend.suggestMask(payload));
+ipcMain.handle("backend:detect-mask", async (_event, payload) => backend.detectMask(payload));
+ipcMain.handle("backend:auto-remove", async (_event, payload) => backend.autoRemove(payload));
 ipcMain.handle("backend:get-job", async (_event, jobId) => backend.getJob(jobId));
 ipcMain.handle("backend:get-jobs", async () => backend.getJobs());
 ipcMain.handle("backend:cancel-job", async (_event, jobId) => backend.cancelJob(jobId));

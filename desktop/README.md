@@ -1,4 +1,4 @@
-# Desktop Shell (Step 2-6)
+# Desktop Shell (Step 2-7)
 
 Electron main process lifecycle orchestration for local Python backend, plus masking UI, async UX, output UX, and packaging setup.
 
@@ -15,7 +15,43 @@ Electron main process lifecycle orchestration for local Python backend, plus mas
 - Step 3 core renderer: drag/drop PNG/JPG, brush/eraser mask, zoom/pan, and remove action
 - Step 4 async UX: stage-aware progress, cancel/retry/reset, graceful error recovery
 - Step 5 output UX: before/after compare slider, save output PNG/JPG, open output folder
-- Step 6 packaging setup: staged Python runtime + bundled backend/models via electron-builder
+- Step 6 heuristic auto-mask prototype (edge/brightness based) for early experimentation
+- Step 7 packaging setup: staged Python runtime + bundled backend/models via electron-builder
+
+## Updated Step 6 Plan (Model-Based Watermark Detection)
+
+Based on QA feedback, the heuristic auto-mask approach over-selects large image regions and is being replaced as the primary path.
+
+### Step 6A: Detector Integration
+
+- Add a dedicated local endpoint for model-driven detection: `POST /mask/detect`
+- Return structured detections (`boxes`, `confidence`, `type`) and optional pixel mask output
+- Keep offline-only execution and CPU fallback support
+
+### Step 6B: Mask Synthesis and Editing
+
+- Convert detector output into editable mask layers on the existing canvas
+- Add confidence threshold and minimum area filtering controls
+- Preserve manual brush/eraser editing as the final authority
+
+### Step 6C: UX Controls and Project Persistence
+
+- Add a separate `Detect Watermark` action (distinct from legacy suggest)
+- Add accept/reject controls per detected region
+- Persist detector settings per project (model, confidence threshold, expansion radius)
+
+### Step 6D: Safety and Fallbacks
+
+- If detector returns too much area, require explicit user confirmation before apply
+- Add hard cap for masked-area ratio unless user overrides
+- Keep legacy heuristic suggest path as fallback only
+
+### Acceptance Criteria
+
+- Detector path does not blanket-mask the full image on typical inputs
+- Settings and presets cause measurable, visible changes to detection coverage
+- User can approve/reject detected regions before inpaint starts
+- At least one benchmark image set is tracked for precision and over-mask ratio
 
 ## Run
 

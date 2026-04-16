@@ -134,6 +134,43 @@
             min-width: 68px;
         }
 
+        .detect-region-actions {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-top: 6px;
+        }
+
+        .detect-region-list {
+            margin: 6px 0 0;
+            padding: 0;
+            list-style: none;
+            display: grid;
+            gap: 6px;
+            max-height: 124px;
+            overflow: auto;
+        }
+
+        .detect-region-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--subtle);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 4px 6px;
+            background: var(--panel);
+        }
+
+        [data-theme="dark"] .detect-region-item {
+            background: #222222;
+        }
+
+        .detect-region-item input {
+            margin: 0;
+        }
+
         .project-panel {
             border-top: 1px solid var(--line);
             border-bottom: 1px solid var(--line);
@@ -884,32 +921,15 @@
                     <span id="deviceNote" class="device-note"></span>
                 </label>
 
-                <label class="control">
-                    AI Suggest Strength <span id="suggestStrengthLabel">50%</span>
-                    <input id="suggestStrength" type="range" min="1" max="100" step="1" value="50" />
-                </label>
-
-                <div class="control">
-                    Suggest Preset
-                    <div class="preset-row">
-                        <button id="suggestPresetLow" type="button">Low</button>
-                        <button id="suggestPresetMedium" type="button">Medium</button>
-                        <button id="suggestPresetHigh" type="button">High</button>
-                    </div>
-                </div>
-
                 <div class="control">
                     Actions
                     <div class="toolbar">
                         <button id="openImageBtn" type="button">Open Image</button>
-                        <button id="suggestMaskBtn" type="button">AI Suggest Mask</button>
-                        <button id="suggestQueueBtn" type="button">Suggest + Queue</button>
-                        <button id="toggleSuggestPreviewBtn" type="button">Preview Suggested: Off</button>
-                        <button id="applySuggestedMaskBtn" type="button">Apply Suggested Mask</button>
                         <button id="eraserBtn" type="button">Eraser Off</button>
                         <button id="clearMaskBtn" type="button">Clear Mask</button>
                         <button id="resetViewBtn" type="button">Reset View</button>
                         <button id="removeBtn" class="primary" type="button">Remove Watermark</button>
+                        <button id="autoRemoveBtn" class="primary" type="button">Auto Remove Watermark</button>
                         <button id="addToQueueBtn" type="button">Add to Queue</button>
                         <button id="cancelBtn" type="button">Cancel</button>
                         <button id="retryBtn" type="button">Retry</button>
