@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("backend", {
   pickImage: () => ipcRenderer.invoke("backend:pick-image"),
   startInpaint: (payload) => ipcRenderer.invoke("backend:start-inpaint", payload),
   getJob: (jobId) => ipcRenderer.invoke("backend:get-job", jobId),
+  getJobs: () => ipcRenderer.invoke("backend:get-jobs"),
   cancelJob: (jobId) => ipcRenderer.invoke("backend:cancel-job", jobId),
   writeMaskDataUrl: (dataUrl) => ipcRenderer.invoke("backend:write-mask", dataUrl),
   saveOutput: (sourcePath, format) => ipcRenderer.invoke("backend:save-output", sourcePath, format),

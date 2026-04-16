@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
-from typing import AsyncGenerator, Dict, Literal, Optional
+from typing import AsyncGenerator, Dict, Literal, Optional, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -299,6 +299,25 @@ def start_inpaint(req: InpaintRequest) -> InpaintResponse:
     worker = threading.Thread(target=run_job, args=(job,), daemon=True)
     worker.start()
     return InpaintResponse(job_id=job_id, status=job.status)
+
+
+@app.get("/jobs", response_model=List[JobStatus])
+def list_jobs() -> List[JobStatus]:
+    with jobs_lock:
+        snapshot = list(jobs.values())
+
+    return [
+        JobStatus(
+            job_id=job.job_id,
+            status=job.status,
+            image_path=str(job.image_path),
+            mask_path=str(job.mask_path),
+            output_path=str(job.output_path) if job.output_path else None,
+            device=job.device,
+            progress=job.progress,
+        )
+        for job in snapshot
+    ]
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatus)

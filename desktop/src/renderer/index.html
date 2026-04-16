@@ -124,6 +124,213 @@
             align-items: center;
         }
 
+        .queue-panel {
+            border-top: 1px solid var(--line);
+            border-bottom: 1px solid var(--line);
+            padding: 10px 16px;
+            background: #f8fbfd;
+        }
+
+        [data-theme="dark"] .queue-panel {
+            background: #1a1a1a;
+        }
+
+        .queue-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            gap: 10px;
+        }
+
+        .queue-header-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        .queue-title {
+            margin: 0;
+            font-size: 13px;
+            color: var(--subtle);
+            font-weight: 700;
+        }
+
+        .queue-count {
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: var(--accent-soft);
+            color: var(--accent);
+            font-size: 11px;
+            font-weight: 700;
+            line-height: 1.4;
+        }
+
+        [data-theme="dark"] .queue-count {
+            background: #1f3b38;
+            color: #7fe3d8;
+        }
+
+        .queue-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .queue-actions button {
+            padding: 6px 10px;
+            font-size: 12px;
+        }
+
+        .queue-list {
+            margin: 0;
+            padding: 0;
+            list-style: none;
+            display: grid;
+            gap: 6px;
+            max-height: 170px;
+            overflow: auto;
+        }
+
+        .queue-item {
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 8px 10px;
+            background: var(--panel);
+            display: grid;
+            grid-template-columns: 44px 1fr auto;
+            gap: 8px;
+            align-items: center;
+        }
+
+        [data-theme="dark"] .queue-item {
+            background: #242424;
+        }
+
+        .queue-item.active {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 1px rgba(57, 164, 153, 0.15);
+        }
+
+        .queue-item-thumb {
+            width: 44px;
+            height: 44px;
+            border-radius: 8px;
+            object-fit: cover;
+            border: 1px solid var(--line);
+            background: #dfe7ef;
+        }
+
+        [data-theme="dark"] .queue-item-thumb {
+            background: #2a2a2a;
+            border-color: #3a3a3a;
+        }
+
+        .queue-item-main {
+            min-width: 0;
+        }
+
+        .queue-item-path {
+            font-size: 12px;
+            color: var(--ink);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .queue-item-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+            font-size: 11px;
+            color: var(--subtle);
+            margin-top: 2px;
+        }
+
+        .queue-status {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1.4;
+            border: 1px solid transparent;
+        }
+
+        .queue-status.pending {
+            background: #eef2ff;
+            color: #4f46e5;
+            border-color: #c7d2fe;
+        }
+
+        .queue-status.processing {
+            background: #e0f2fe;
+            color: #0369a1;
+            border-color: #bae6fd;
+        }
+
+        .queue-status.completed {
+            background: #dcfce7;
+            color: #15803d;
+            border-color: #bbf7d0;
+        }
+
+        .queue-status.failed {
+            background: #fee2e2;
+            color: #b91c1c;
+            border-color: #fecaca;
+        }
+
+        .queue-status.cancelled {
+            background: #f3f4f6;
+            color: #4b5563;
+            border-color: #d1d5db;
+        }
+
+        [data-theme="dark"] .queue-status.pending {
+            background: #1f2937;
+            color: #c7d2fe;
+            border-color: #374151;
+        }
+
+        [data-theme="dark"] .queue-status.processing {
+            background: #0f2f3c;
+            color: #7dd3fc;
+            border-color: #164e63;
+        }
+
+        [data-theme="dark"] .queue-status.completed {
+            background: #12311f;
+            color: #86efac;
+            border-color: #14532d;
+        }
+
+        [data-theme="dark"] .queue-status.failed {
+            background: #3a2222;
+            color: #fca5a5;
+            border-color: #5b2626;
+        }
+
+        [data-theme="dark"] .queue-status.cancelled {
+            background: #2b2b2b;
+            color: #cbd5e1;
+            border-color: #404040;
+        }
+
+        .queue-item-controls {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .queue-item-controls button {
+            padding: 4px 8px;
+            font-size: 11px;
+        }
+
         button {
             border: 1px solid var(--line);
             border-radius: 10px;
@@ -487,12 +694,29 @@
                         <button id="clearMaskBtn" type="button">Clear Mask</button>
                         <button id="resetViewBtn" type="button">Reset View</button>
                         <button id="removeBtn" class="primary" type="button">Remove Watermark</button>
+                        <button id="addToQueueBtn" type="button">Add to Queue</button>
                         <button id="cancelBtn" type="button">Cancel</button>
                         <button id="retryBtn" type="button">Retry</button>
                         <button id="resetJobBtn" type="button">Reset</button>
                     </div>
                 </div>
             </div>
+
+            <section class="queue-panel">
+                <div class="queue-header">
+                    <div class="queue-header-left">
+                        <p class="queue-title">Render Queue</p>
+                        <span id="queueCountLabel" class="queue-count">0 items</span>
+                    </div>
+                    <div class="queue-actions">
+                        <button id="processAllBtn" class="primary" type="button">Process All</button>
+                        <button id="clearQueueBtn" type="button">Clear Queue</button>
+                    </div>
+                </div>
+                <ul id="queueList" class="queue-list">
+                    <li class="empty-note" id="queueEmptyNote">No queued jobs yet.</li>
+                </ul>
+            </section>
 
             <div id="canvasWrap" class="canvas-wrap">
                 <canvas id="paintCanvas"></canvas>

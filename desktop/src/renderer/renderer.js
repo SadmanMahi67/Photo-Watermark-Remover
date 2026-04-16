@@ -33,9 +33,14 @@ const eraserBtn = document.getElementById("eraserBtn");
 const clearMaskBtn = document.getElementById("clearMaskBtn");
 const resetViewBtn = document.getElementById("resetViewBtn");
 const removeBtn = document.getElementById("removeBtn");
+const addToQueueBtn = document.getElementById("addToQueueBtn");
 const cancelBtn = document.getElementById("cancelBtn");
 const retryBtn = document.getElementById("retryBtn");
 const resetJobBtn = document.getElementById("resetJobBtn");
+const processAllBtn = document.getElementById("processAllBtn");
+const clearQueueBtn = document.getElementById("clearQueueBtn");
+const queueList = document.getElementById("queueList");
+const queueCountLabel = document.getElementById("queueCountLabel");
 
 const ctx = canvas.getContext("2d");
 const sourceCanvas = document.createElement("canvas");
@@ -51,9 +56,15 @@ const jobState = {
   error: null,
 };
 
+const queueStore = {
+  jobsById: new Map(),
+  activeJobId: null,
+  queuedItems: [],
+  processingAll: false,
+};
+
 let backendReady = false;
 let outputPanelState = "no-output";
-let currentJobId = null;
 let currentJobStartedAt = null;
 let lastProcessingSeconds = null;
 let selectedDevice = "cpu";
@@ -66,6 +77,125 @@ let currentTheme = "light";
 const THEME_KEY = "pwr.theme";
 const THEME_LIGHT = "light";
 const THEME_DARK = "dark";
+
+function upsertQueueJob(job) {
+  if (!job || !job.job_id) {
+    return;
+  }
+  queueStore.jobsById.set(job.job_id, {
+    ...(queueStore.jobsById.get(job.job_id) || {}),
+    ...job,
+  });
+}
+
+function setActiveQueueJob(jobId) {
+  queueStore.activeJobId = jobId || null;
+}
+
+async function refreshQueueSnapshot() {
+  if (!window.backend?.getJobs) {
+    return;
+  }
+  const jobs = await window.backend.getJobs();
+  if (!Array.isArray(jobs)) {
+    return;
+  }
+  for (const job of jobs) {
+    upsertQueueJob(job);
+  }
+}
+
+function createQueueItem(payload) {
+  return {
+    id: `queue-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    imagePath: payload.imagePath,
+    maskPath: payload.maskPath,
+    device: payload.device,
+    status: "pending",
+    progress: { stage: "pending", percent: 0, error: null },
+    backendJobId: null,
+    outputPath: null,
+    error: null,
+    createdAt: Date.now(),
+  };
+}
+
+function queueStatusLabel(item) {
+  if (item.status === "processing") {
+    return `${humanStage(item.progress?.stage)} ${Number(item.progress?.percent || 0)}%`;
+  }
+  if (item.status === "pending") {
+    return "Pending";
+  }
+  if (item.status === "completed") {
+    return "Completed";
+  }
+  if (item.status === "failed") {
+    return "Failed";
+  }
+  if (item.status === "cancelled") {
+    return "Cancelled";
+  }
+  return String(item.status || "Unknown");
+}
+
+function queueStatusClass(item) {
+  if (item.status === "processing") return "processing";
+  if (item.status === "pending") return "pending";
+  if (item.status === "completed") return "completed";
+  if (item.status === "failed") return "failed";
+  if (item.status === "cancelled") return "cancelled";
+  return "pending";
+}
+
+function hasPendingQueueItems() {
+  return queueStore.queuedItems.some((item) => item.status === "pending");
+}
+
+function renderQueueList() {
+  if (!queueList) {
+    return;
+  }
+
+  if (queueCountLabel) {
+    queueCountLabel.textContent = `${queueStore.queuedItems.length} item${queueStore.queuedItems.length === 1 ? "" : "s"}`;
+  }
+
+  if (!queueStore.queuedItems.length) {
+    queueList.innerHTML = "<li class=\"empty-note\">No queued jobs yet.</li>";
+    return;
+  }
+
+  const html = queueStore.queuedItems.map((item) => {
+    const canCancel = item.status === "pending" || item.status === "processing";
+    const canRemove = item.status !== "processing";
+    const statusText = queueStatusLabel(item);
+    const statusClass = queueStatusClass(item);
+    const errorText = item.error ? ` | ${item.error}` : "";
+    const title = String(item.imagePath || "").replace(/"/g, "&quot;");
+    const thumbSrc = item.imagePath ? fileUrlFromPath(item.imagePath) : "";
+    const activeClass = queueStore.activeJobId === item.backendJobId && item.backendJobId ? "active" : "";
+
+    return `
+      <li class="queue-item ${activeClass}" data-queue-id="${item.id}">
+        <img class="queue-item-thumb" src="${thumbSrc}" alt="Thumbnail" />
+        <div class="queue-item-main">
+          <div class="queue-item-path" title="${title}">${item.imagePath || "(unknown image)"}</div>
+          <div class="queue-item-meta">
+            <span class="queue-status ${statusClass}">${statusText}</span>
+            ${errorText ? `<span>${errorText}</span>` : ""}
+          </div>
+        </div>
+        <div class="queue-item-controls">
+          <button type="button" data-action="cancel" data-queue-id="${item.id}" ${canCancel ? "" : "disabled"}>Cancel</button>
+          <button type="button" data-action="remove" data-queue-id="${item.id}" ${canRemove ? "" : "disabled"}>Remove</button>
+        </div>
+      </li>
+    `;
+  }).join("");
+
+  queueList.innerHTML = html;
+}
 
 function applyTheme(theme) {
   const isDark = theme === THEME_DARK;
@@ -170,19 +300,24 @@ function syncUi() {
   const hasImage = Boolean(jobState.imageSource);
   const hasOutput = Boolean(jobState.output);
   const running = jobState.status === "processing" || jobState.status === "cancelling";
+  const queueBusy = queueStore.processingAll;
+  const activeJobId = queueStore.activeJobId;
   const canRetry = Boolean(hasImage && jobState.error);
-  removeBtn.disabled = !hasImage || running || !backendReady;
-  openImageBtn.disabled = running;
-  eraserBtn.disabled = running || !hasImage;
-  clearMaskBtn.disabled = running || !hasImage;
-  resetViewBtn.disabled = running || !hasImage;
-  cancelBtn.disabled = !currentJobId || !running;
+  removeBtn.disabled = !hasImage || running || !backendReady || queueBusy;
+  addToQueueBtn.disabled = !hasImage || running || !backendReady || queueBusy;
+  processAllBtn.disabled = !hasPendingQueueItems() || !backendReady || running || queueBusy;
+  clearQueueBtn.disabled = queueBusy || queueStore.queuedItems.length === 0;
+  openImageBtn.disabled = running || queueBusy;
+  eraserBtn.disabled = running || queueBusy || !hasImage;
+  clearMaskBtn.disabled = running || queueBusy || !hasImage;
+  resetViewBtn.disabled = running || queueBusy || !hasImage;
+  cancelBtn.disabled = !activeJobId || !running;
   retryBtn.disabled = !canRetry || running;
-  resetJobBtn.disabled = running;
-  saveOutputBtn.disabled = !hasOutput || running;
-  openFolderBtn.disabled = !hasOutput || running;
-  outputFormatSelect.disabled = running;
-  deviceSelect.disabled = running;
+  resetJobBtn.disabled = running || queueBusy;
+  saveOutputBtn.disabled = !hasOutput || running || queueBusy;
+  openFolderBtn.disabled = !hasOutput || running || queueBusy;
+  outputFormatSelect.disabled = running || queueBusy;
+  deviceSelect.disabled = running || queueBusy;
 
   if (jobState.error) {
     errorNote.style.display = "block";
@@ -196,6 +331,7 @@ function syncUi() {
     ? `Processed in ${lastProcessingSeconds.toFixed(1)}s`
     : "";
   outputZoomLabel.textContent = `${Math.round(outputZoom * 100)}%`;
+  renderQueueList();
 }
 
 function setOutputZoom(next) {
@@ -405,7 +541,7 @@ function clearJobState() {
   jobState.progress = { stage: "idle", percent: 0, error: null };
   jobState.output = null;
   jobState.error = null;
-  currentJobId = null;
+  setActiveQueueJob(null);
   currentJobStartedAt = null;
   lastProcessingSeconds = null;
 
@@ -460,14 +596,31 @@ async function removeWatermark() {
       device: selectedDevice,
     });
 
-    currentJobId = started.job_id;
+    const startedJob = {
+      job_id: started.job_id,
+      status: started.status,
+      image_path: jobState.imageSource,
+      mask_path: jobState.maskSource,
+      output_path: null,
+      device: selectedDevice,
+      progress: { stage: "starting_backend_job", percent: 30, error: null },
+    };
+    upsertQueueJob(startedJob);
+    setActiveQueueJob(started.job_id);
+
     while (true) {
-      const detail = await window.backend.getJob(currentJobId);
+      const activeJobId = queueStore.activeJobId;
+      if (!activeJobId) {
+        return;
+      }
+
+      const detail = await window.backend.getJob(activeJobId);
+      upsertQueueJob(detail);
       jobState.progress = detail.progress;
       jobState.status = detail.status;
       jobState.output = detail.output_path || null;
       if (detail.status === "completed") {
-        currentJobId = null;
+        setActiveQueueJob(null);
         if (currentJobStartedAt !== null) {
           lastProcessingSeconds = (performance.now() - currentJobStartedAt) / 1000;
         }
@@ -477,7 +630,7 @@ async function removeWatermark() {
         return;
       }
       if (detail.status === "cancelled") {
-        currentJobId = null;
+        setActiveQueueJob(null);
         currentJobStartedAt = null;
         jobState.status = "cancelled";
         jobState.error = null;
@@ -487,7 +640,7 @@ async function removeWatermark() {
         return;
       }
       if (detail.status === "failed") {
-        currentJobId = null;
+        setActiveQueueJob(null);
         currentJobStartedAt = null;
         throw new Error(detail.progress?.error || `Job ${detail.status}`);
       }
@@ -495,7 +648,7 @@ async function removeWatermark() {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   } catch (error) {
-    currentJobId = null;
+    setActiveQueueJob(null);
     currentJobStartedAt = null;
     jobState.status = "error";
     jobState.error = error?.message || String(error);
@@ -504,8 +657,139 @@ async function removeWatermark() {
   }
 }
 
+async function addCurrentImageToQueue() {
+  if (!jobState.imageSource || !viewState.image) {
+    jobState.error = "Load an image first";
+    syncUi();
+    return;
+  }
+
+  if (!hasMaskPixels()) {
+    jobState.error = "Mask is empty. Paint over the watermark before adding to queue.";
+    syncUi();
+    return;
+  }
+
+  try {
+    jobState.error = null;
+    const maskDataUrl = maskCanvas.toDataURL("image/png");
+    const maskPath = await window.backend.writeMaskDataUrl(maskDataUrl);
+    queueStore.queuedItems.push(createQueueItem({
+      imagePath: jobState.imageSource,
+      maskPath,
+      device: selectedDevice,
+    }));
+    syncUi();
+  } catch (error) {
+    jobState.error = `Failed to add queue item: ${error?.message || error}`;
+    syncUi();
+  }
+}
+
+async function processQueuedItem(item) {
+  item.status = "processing";
+  item.progress = { stage: "starting_backend_job", percent: 5, error: null };
+  item.error = null;
+  syncUi();
+
+  const started = await window.backend.startInpaint({
+    image_path: item.imagePath,
+    mask_path: item.maskPath,
+    device: item.device,
+  });
+
+  item.backendJobId = started.job_id;
+  setActiveQueueJob(started.job_id);
+
+  while (true) {
+    const detail = await window.backend.getJob(started.job_id);
+    upsertQueueJob(detail);
+    item.progress = detail.progress;
+    item.outputPath = detail.output_path || null;
+
+    if (detail.status === "completed") {
+      item.status = "completed";
+      setActiveQueueJob(null);
+      syncUi();
+      return;
+    }
+    if (detail.status === "cancelled") {
+      item.status = "cancelled";
+      item.error = null;
+      setActiveQueueJob(null);
+      syncUi();
+      return;
+    }
+    if (detail.status === "failed") {
+      item.status = "failed";
+      item.error = detail.progress?.error || "Queue item failed";
+      setActiveQueueJob(null);
+      syncUi();
+      return;
+    }
+
+    syncUi();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+async function processAllQueueItems() {
+  if (queueStore.processingAll || !hasPendingQueueItems()) {
+    return;
+  }
+
+  queueStore.processingAll = true;
+  syncUi();
+
+  try {
+    for (const item of queueStore.queuedItems) {
+      if (item.status !== "pending") {
+        continue;
+      }
+      await processQueuedItem(item);
+    }
+  } catch (error) {
+    jobState.error = `Queue processing failed: ${error?.message || error}`;
+  } finally {
+    queueStore.processingAll = false;
+    setActiveQueueJob(null);
+    syncUi();
+  }
+}
+
+async function cancelQueueItem(queueId) {
+  const item = queueStore.queuedItems.find((entry) => entry.id === queueId);
+  if (!item) {
+    return;
+  }
+
+  if (item.status === "pending") {
+    item.status = "cancelled";
+    syncUi();
+    return;
+  }
+
+  if (item.status === "processing" && item.backendJobId) {
+    try {
+      await window.backend.cancelJob(item.backendJobId);
+    } catch (error) {
+      item.error = `Cancel failed: ${error?.message || error}`;
+      syncUi();
+    }
+  }
+}
+
+function clearQueueItems() {
+  if (queueStore.processingAll) {
+    return;
+  }
+  queueStore.queuedItems = [];
+  syncUi();
+}
+
 async function cancelCurrentJob() {
-  if (!currentJobId) {
+  const activeJobId = queueStore.activeJobId;
+  if (!activeJobId) {
     return;
   }
 
@@ -513,7 +797,7 @@ async function cancelCurrentJob() {
     jobState.status = "cancelling";
     jobState.progress = { stage: "cancelling", percent: jobState.progress.percent || 0, error: null };
     syncUi();
-    await window.backend.cancelJob(currentJobId);
+    await window.backend.cancelJob(activeJobId);
   } catch (error) {
     jobState.status = "error";
     jobState.error = `Cancel failed: ${error?.message || error}`;
@@ -717,6 +1001,18 @@ removeBtn.addEventListener("click", async () => {
   await removeWatermark();
 });
 
+addToQueueBtn.addEventListener("click", async () => {
+  await addCurrentImageToQueue();
+});
+
+processAllBtn.addEventListener("click", async () => {
+  await processAllQueueItems();
+});
+
+clearQueueBtn.addEventListener("click", () => {
+  clearQueueItems();
+});
+
 cancelBtn.addEventListener("click", async () => {
   await cancelCurrentJob();
 });
@@ -767,6 +1063,31 @@ resultArea.addEventListener("wheel", (event) => {
   const delta = event.deltaY < 0 ? 1.1 : 0.9;
   setOutputZoom(outputZoom * delta);
 }, { passive: false });
+
+if (queueList) {
+  queueList.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const action = target.getAttribute("data-action");
+    const queueId = target.getAttribute("data-queue-id");
+    if (!action || !queueId) {
+      return;
+    }
+
+    if (action === "cancel") {
+      await cancelQueueItem(queueId);
+      return;
+    }
+
+    if (action === "remove") {
+      queueStore.queuedItems = queueStore.queuedItems.filter((item) => item.id !== queueId);
+      syncUi();
+    }
+  });
+}
 
 window.backend.onStatusChanged((status) => {
   setBackendStatus(status);
@@ -868,6 +1189,7 @@ if (themeToggleBtn) {
   syncUi();
 
   try {
+    await refreshQueueSnapshot();
     const status = await window.backend.getStatus();
     setBackendStatus(status);
     const detectedDevices = await window.backend.getDevices();

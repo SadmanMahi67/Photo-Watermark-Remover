@@ -202,6 +202,7 @@ ipcMain.handle("backend:pick-image", async () => {
 });
 ipcMain.handle("backend:start-inpaint", async (_event, payload) => backend.startInpaint(payload));
 ipcMain.handle("backend:get-job", async (_event, jobId) => backend.getJob(jobId));
+ipcMain.handle("backend:get-jobs", async () => backend.getJobs());
 ipcMain.handle("backend:cancel-job", async (_event, jobId) => backend.cancelJob(jobId));
 ipcMain.handle("backend:write-mask", async (_event, dataUrl) => {
   if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/png;base64,")) {

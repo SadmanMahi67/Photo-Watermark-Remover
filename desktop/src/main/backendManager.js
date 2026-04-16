@@ -417,6 +417,10 @@ class BackendManager extends EventEmitter {
     return this.requestJson("GET", `/jobs/${jobId}`);
   }
 
+  async getJobs() {
+    return this.requestJson("GET", "/jobs");
+  }
+
   async cancelJob(jobId) {
     return this.requestJson("POST", `/jobs/${jobId}/cancel`);
   }
