@@ -398,7 +398,7 @@ class BackendManager extends EventEmitter {
       });
 
       req.on("error", reject);
-      req.setTimeout(120000, () => {
+      req.setTimeout(300000, () => {
         req.destroy(new Error(`Backend request timeout for ${method} ${endpointPath}`));
       });
 

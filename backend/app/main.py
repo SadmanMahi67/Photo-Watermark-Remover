@@ -194,7 +194,7 @@ def load_florence2_components():
         return florence_processor, florence_model
 
 
-def detect_boxes_florence(image_path: Path, requested_device: Literal["cpu", "cuda", "mps"]) -> List[DetectionBox]:
+def detect_watermark_florence(image_path: Path, requested_device: Literal["cpu", "cuda", "mps"]) -> tuple[List[DetectionBox], Optional[Image.Image]]:
     processor, model = load_florence2_components()
 
     try:
@@ -214,8 +214,8 @@ def detect_boxes_florence(image_path: Path, requested_device: Literal["cpu", "cu
         rgb = src.convert("RGB")
         width, height = rgb.size
 
-    # Florence-2 requires the task token to be the full text for OD.
-    prompt = "<OD>"
+    # Use precise segmentation for watermark detection to eliminate blurriness
+    prompt = "<REFERRING_EXPRESSIONS_SEGMENTATION>watermark"
     inputs = processor(text=prompt, images=rgb, return_tensors="pt")
     for key, value in list(inputs.items()):
         if hasattr(value, "to"):
@@ -231,44 +231,61 @@ def detect_boxes_florence(image_path: Path, requested_device: Literal["cpu", "cu
         )
 
     generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
-    parsed = processor.post_process_generation(generated_text, task="<OD>", image_size=(width, height))
+    parsed = processor.post_process_generation(generated_text, task="<REFERRING_EXPRESSIONS_SEGMENTATION>", image_size=(width, height))
 
-    od = parsed.get("<OD>") if isinstance(parsed, dict) else None
-    bboxes = od.get("bboxes", []) if isinstance(od, dict) else []
-    labels = od.get("labels", []) if isinstance(od, dict) else []
+    seg = parsed.get("<REFERRING_EXPRESSIONS_SEGMENTATION>") if isinstance(parsed, dict) else None
+    polygons = seg.get("polygons", []) if isinstance(seg, dict) else []
+    labels = seg.get("labels", []) if isinstance(seg, dict) else []
 
     results: List[DetectionBox] = []
-    for i, box in enumerate(bboxes):
-        if not isinstance(box, (list, tuple)) or len(box) < 4:
+    mask = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    mask_found = False
+
+    for i, poly in enumerate(polygons):
+        if not isinstance(poly, (list, tuple)) or len(poly) < 4:
             continue
-        x0, y0, x1, y1 = [int(max(0, round(float(v)))) for v in box[:4]]
-        x0 = min(x0, width - 1)
-        y0 = min(y0, height - 1)
+        
+        label = str(labels[i]).lower() if i < len(labels) else ""
+        label_is_watermarkish = any(token in label for token in ["watermark", "logo", "text", "stamp", "signature", "brand", "copyright", "website", "url", "writing"])
+        if not label_is_watermarkish:
+            continue
+
+        # Convert flat list [x1, y1, x2, y2, ...] to list of tuples [(x1, y1), (x2, y2), ...]
+        points = [(poly[j], poly[j+1]) for j in range(0, len(poly) - 1, 2)]
+        draw.polygon(points, fill=255)
+        mask_found = True
+
+        # Calculate bounding box for this polygon to maintain DetectionBox metadata
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        
+        x0 = max(0, min(x0, width - 1))
+        y0 = max(0, min(y0, height - 1))
         x1 = max(x0 + 1, min(x1, width))
         y1 = max(y0 + 1, min(y1, height))
-        label = str(labels[i]).lower() if i < len(labels) else ""
-        label_is_watermarkish = any(token in label for token in ["watermark", "logo", "text", "stamp"])
-        confidence = 0.74 if label_is_watermarkish else 0.46
+
         results.append(
             DetectionBox(
-                x=x0,
-                y=y0,
-                width=x1 - x0,
-                height=y1 - y0,
-                confidence=confidence,
+                x=int(x0),
+                y=int(y0),
+                width=int(x1 - x0),
+                height=int(y1 - y0),
+                confidence=0.74,
                 kind="watermark",
             )
         )
 
-    return results
+    return results, (mask if mask_found else None)
 
 
-def write_mask_from_boxes(mask_path: Path, width: int, height: int, boxes: List[DetectionBox]) -> None:
+def write_mask_from_boxes(mask_path: Path, width: int, height: int, boxes: List[DetectionBox], padding_factor: float = 0.006) -> None:
     mask = Image.new("L", (width, height), 0)
     draw = ImageDraw.Draw(mask)
 
-    pad_x = max(2, int(width * 0.006))
-    pad_y = max(2, int(height * 0.006))
+    pad_x = max(1, int(width * padding_factor))
+    pad_y = max(1, int(height * padding_factor))
     for box in boxes:
         x0 = max(0, box.x - pad_x)
         y0 = max(0, box.y - pad_y)
@@ -558,6 +575,103 @@ def run_job(job: Job) -> None:
     finally:
         job.process = None
 
+def run_auto_remove_job(job: Job) -> None:
+    try:
+        job.status = "running"
+        push_progress(job, stage="detecting_watermark", percent=10)
+
+        image = job.image_path
+        requested_device = job.device
+
+        detector = "florence2-lama"
+        try:
+            boxes, fl_mask = detect_watermark_florence(image, requested_device)
+        except Exception:
+            # Fallback keeps one-click remove usable when Florence-2 files are not present yet.
+            boxes, fl_mask = [], None
+
+        if not boxes:
+            # First attempt: Standard heuristic
+            push_progress(job, stage="detecting_watermark", percent=20)
+            fallback_mask_path, (width, height) = suggest_mask_file(image, None, strength=58)
+            boxes, _masked_area = detect_boxes_from_mask(
+                mask_path=fallback_mask_path,
+                width=width,
+                height=height,
+                min_area_ratio=0.0005,
+                min_confidence=0.10,
+                max_detections=24,
+            )
+            detector = "stub.edge-brightness-v1-fallback-lama"
+
+            # Second attempt: More aggressive heuristic if first failed
+            if not boxes:
+                push_progress(job, stage="detecting_watermark", percent=30)
+                fallback_mask_path, (width, height) = suggest_mask_file(image, None, strength=85)
+                boxes, _masked_area = detect_boxes_from_mask(
+                    mask_path=fallback_mask_path,
+                    width=width,
+                    height=height,
+                    min_area_ratio=0.0001,
+                    min_confidence=0.05,
+                    max_detections=24,
+                )
+                if boxes:
+                    detector = "stub.edge-brightness-v1-aggressive-lama"
+
+        if not boxes:
+            raise RuntimeError("no watermark detected")
+
+        push_progress(job, stage="creating_mask", percent=40)
+        with Image.open(image) as src:
+            width, height = src.size
+
+        if detector.startswith("stub"):
+            # Use the high-quality heuristic mask directly instead of converting to rectangles
+            import shutil
+            shutil.copy(fallback_mask_path, job.mask_path)
+        elif fl_mask is not None:
+            # Use the precise segmentation mask from Florence-2 to eliminate blurriness
+            fl_mask.save(job.mask_path, format="PNG")
+        else:
+            # Fallback for Florence-2 if it only returned boxes
+            write_mask_from_boxes(job.mask_path, width, height, boxes, padding_factor=0.002)
+
+        output_path = output_path_for(image, str(job.output_path) if job.output_path else None)
+        job.output_path = output_path
+
+        push_progress(job, stage="inpainting", percent=50)
+        proc = iopaint_run(image, job.mask_path, output_path, requested_device)
+        job.process = proc
+
+        percent_re = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                line = line.strip()
+                match = percent_re.search(line)
+                if match:
+                    found = min(99, max(50, int(float(match.group(1)))))
+                    push_progress(job, stage="inpainting", percent=found)
+
+        code = proc.wait()
+        if code != 0:
+            raise RuntimeError(f"auto remove failed with exit code {code}")
+
+        push_progress(job, stage="writing_output", percent=98)
+        resolved_output = resolve_generated_output_path(output_path, image)
+        if resolved_output is None:
+            raise RuntimeError("auto remove finished but output file was not created")
+        job.output_path = resolved_output
+
+        job.status = "completed"
+        push_progress(job, stage="completed", percent=100)
+
+    except Exception as exc:
+        job.status = "failed"
+        push_progress(job, stage="failed", percent=100, error=str(exc))
+    finally:
+        job.process = None
+
 
 def set_warmup(stage: str, percent: int, error: Optional[str] = None) -> None:
     global warmup_progress
@@ -691,60 +805,22 @@ def detect_mask(req: DetectMaskRequest) -> DetectMaskResponse:
     )
 
 
-@app.post("/auto-remove", response_model=AutoRemoveResponse)
-def auto_remove(req: AutoRemoveRequest) -> AutoRemoveResponse:
+@app.post("/auto-remove", response_model=InpaintResponse)
+def auto_remove(req: AutoRemoveRequest) -> InpaintResponse:
     image = Path(req.image_path).expanduser().resolve()
     if not image.exists() or not image.is_file():
         raise HTTPException(status_code=400, detail=f"image_path does not exist: {image}")
 
-    detector = "florence2-lama"
-    try:
-        boxes = detect_boxes_florence(image, req.device)
-    except Exception:
-        # Fallback keeps one-click remove usable when Florence-2 files are not present yet.
-        boxes = []
+    job_id = str(uuid.uuid4())
+    mask_path, output_path = auto_remove_tmp_paths(image)
 
-    if not boxes:
-        mask_path, (width, height) = suggest_mask_file(image, None, strength=58)
-        boxes, _masked_area = detect_boxes_from_mask(
-            mask_path=mask_path,
-            width=width,
-            height=height,
-            min_area_ratio=0.0005,
-            min_confidence=0.10,
-            max_detections=24,
-        )
-        detector = "stub.edge-brightness-v1-fallback-lama"
+    job = Job(job_id=job_id, image_path=image, mask_path=mask_path, output_path=output_path, device=req.device)
+    with jobs_lock:
+        jobs[job_id] = job
 
-    if not boxes:
-        raise HTTPException(status_code=422, detail="no watermark detected")
-
-    mask_path, generated_output = auto_remove_tmp_paths(image)
-    with Image.open(image) as src:
-        width, height = src.size
-    write_mask_from_boxes(mask_path, width, height, boxes)
-
-    output_path = output_path_for(image, req.output_path or str(generated_output))
-    proc = iopaint_run(image, mask_path, output_path, req.device)
-
-    if proc.stdout is not None:
-        for _line in proc.stdout:
-            pass
-    code = proc.wait()
-    if code != 0:
-        raise HTTPException(status_code=500, detail=f"auto remove failed with exit code {code}")
-
-    resolved_output = resolve_generated_output_path(output_path, image)
-    if resolved_output is None:
-        raise HTTPException(status_code=500, detail="auto remove finished but output was not created")
-
-    return AutoRemoveResponse(
-        output_path=str(resolved_output),
-        mask_path=str(mask_path),
-        detector=detector,
-        detections=len(boxes),
-        device=req.device,
-    )
+    worker = threading.Thread(target=run_auto_remove_job, args=(job,), daemon=True)
+    worker.start()
+    return InpaintResponse(job_id=job_id, status=job.status)
 
 
 @app.post("/inpaint", response_model=InpaintResponse)

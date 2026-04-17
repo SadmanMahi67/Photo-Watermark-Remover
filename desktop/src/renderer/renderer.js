@@ -1546,7 +1546,7 @@ async function autoRemoveWatermark() {
   }
 
   if (!window.backend?.autoRemove) {
-    jobState.error = "Auto remove is unavailable in this build.";
+    jobState.error = "Auto remove is unavailable in this build";
     syncUi();
     return;
   }
@@ -1554,40 +1554,81 @@ async function autoRemoveWatermark() {
   try {
     jobState.error = null;
     jobState.status = "processing";
-    jobState.progress = { stage: "detecting_watermark", percent: 14, error: null };
+    jobState.progress = { stage: "starting_backend_job", percent: 10, error: null };
     setOutputState("processing");
     currentJobStartedAt = performance.now();
     lastProcessingSeconds = null;
     syncUi();
 
-    const result = await window.backend.autoRemove({
+    const started = await window.backend.autoRemove({
       image_path: jobState.imageSource,
       device: selectedDevice,
     });
 
-    if (!result?.output_path) {
-      throw new Error("Auto remove did not produce output.");
+    if (!started?.job_id) {
+      throw new Error("Auto remove failed to start. No job ID returned.");
     }
 
-    jobState.output = result.output_path;
-    jobState.maskSource = result.mask_path || null;
-    jobState.status = "completed";
-    jobState.progress = { stage: "completed", percent: 100, error: null };
-    if (currentJobStartedAt !== null) {
-      lastProcessingSeconds = (performance.now() - currentJobStartedAt) / 1000;
+    await updateProjectJobHistory(jobState.imageSource, "processing", null, started.job_id);
+
+    const startedJob = {
+      job_id: started.job_id,
+      status: started.status,
+      image_path: jobState.imageSource,
+      mask_path: null,
+      output_path: null,
+      device: selectedDevice,
+      progress: { stage: "starting_backend_job", percent: 10, error: null },
+    };
+    upsertQueueJob(startedJob);
+    setActiveQueueJob(started.job_id);
+
+    while (true) {
+      const activeJobId = queueStore.activeJobId;
+      if (!activeJobId) {
+        return;
+      }
+
+      const detail = await window.backend.getJob(activeJobId);
+      upsertQueueJob(detail);
+      jobState.progress = detail.progress;
+      jobState.status = detail.status;
+      jobState.output = detail.output_path || null;
+      jobState.maskSource = detail.mask_path || null;
+
+      if (detail.status === "completed") {
+        await updateProjectJobHistory(jobState.imageSource, "completed", detail.output_path || null, detail.job_id);
+        setActiveQueueJob(null);
+        if (currentJobStartedAt !== null) {
+          lastProcessingSeconds = (performance.now() - currentJobStartedAt) / 1000;
+        }
+        currentJobStartedAt = null;
+        paintOutput(jobState.output);
+        syncUi();
+        return;
+      }
+      if (detail.status === "cancelled") {
+        await updateProjectJobHistory(jobState.imageSource, "cancelled", null, detail.job_id);
+        setActiveQueueJob(null);
+        currentJobStartedAt = null;
+        jobState.status = "cancelled";
+        jobState.error = null;
+        jobState.progress = { stage: "cancelled", percent: 0, error: null };
+        setOutputState("no-output");
+        syncUi();
+        return;
+      }
+      if (detail.status === "failed") {
+        await updateProjectJobHistory(jobState.imageSource, "failed", detail.output_path || null, detail.job_id);
+        setActiveQueueJob(null);
+        currentJobStartedAt = null;
+        throw new Error(detail.progress?.error || `Job ${detail.status}`);
+      }
+      syncUi();
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    currentJobStartedAt = null;
-
-    await updateProjectJobHistory(
-      jobState.imageSource,
-      "completed",
-      result.output_path,
-      `auto-${Date.now()}`,
-    );
-
-    paintOutput(result.output_path);
-    syncUi();
   } catch (error) {
+    setActiveQueueJob(null);
     currentJobStartedAt = null;
     jobState.status = "error";
     jobState.error = `Auto remove failed: ${error?.message || error}`;
