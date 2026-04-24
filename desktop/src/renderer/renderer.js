@@ -29,23 +29,9 @@ const projectImageList = document.getElementById("projectImageList");
 
 const brushSizeInput = document.getElementById("brushSize");
 const brushSizeLabel = document.getElementById("brushSizeLabel");
-const suggestStrengthInput = document.getElementById("suggestStrength");
-const suggestStrengthLabel = document.getElementById("suggestStrengthLabel");
-const suggestPresetLowBtn = document.getElementById("suggestPresetLow");
-const suggestPresetMediumBtn = document.getElementById("suggestPresetMedium");
-const suggestPresetHighBtn = document.getElementById("suggestPresetHigh");
-const detectionNote = document.getElementById("detectionNote");
-const detectionRegionList = document.getElementById("detectionRegionList");
-const selectAllRegionsBtn = document.getElementById("selectAllRegionsBtn");
-const selectNoneRegionsBtn = document.getElementById("selectNoneRegionsBtn");
 const zoomSlider = document.getElementById("zoomSlider");
 const zoomLabel = document.getElementById("zoomLabel");
 const openImageBtn = document.getElementById("openImageBtn");
-const suggestMaskBtn = document.getElementById("suggestMaskBtn");
-const suggestQueueBtn = document.getElementById("suggestQueueBtn");
-const toggleSuggestPreviewBtn = document.getElementById("toggleSuggestPreviewBtn");
-const applySuggestedMaskBtn = document.getElementById("applySuggestedMaskBtn");
-const autoRemoveBtn = document.getElementById("autoRemoveBtn");
 const eraserBtn = document.getElementById("eraserBtn");
 const clearMaskBtn = document.getElementById("clearMaskBtn");
 const resetViewBtn = document.getElementById("resetViewBtn");
@@ -98,9 +84,8 @@ let updatePromptVisible = false;
 let updateInstallVersion = null;
 let updateInstallAccepted = false;
 let currentTheme = "light";
-let suggestStrength = Number(suggestStrengthInput?.value || 50);
+let suggestStrength = 50;
 let suggestPreset = "medium";
-let previewSuggestedMask = false;
 
 const SUGGEST_PRESET_STRENGTH = {
   low: 30,
@@ -772,7 +757,11 @@ const viewState = {
 };
 
 function fileUrlFromPath(filePath) {
-  return `file:///${filePath.replace(/\\/g, "/")}`;
+  if (!filePath) {
+    return "";
+  }
+  // Use the custom media:// protocol registered in main.js
+  return `media://${String(filePath)}`;
 }
 
 function syncUi() {
@@ -815,15 +804,6 @@ function syncUi() {
   processAllBtn.disabled = !hasPendingQueueItems() || !backendReady || running || queueBusy;
   clearQueueBtn.disabled = queueBusy || queueStore.queuedItems.length === 0;
   openImageBtn.disabled = running || queueBusy;
-  if (suggestMaskBtn) suggestMaskBtn.disabled = !hasImage || running || queueBusy || !backendReady;
-  if (suggestQueueBtn) suggestQueueBtn.disabled = !hasImage || running || queueBusy || !backendReady;
-  if (autoRemoveBtn) autoRemoveBtn.disabled = !hasImage || running || queueBusy || !backendReady;
-  if (toggleSuggestPreviewBtn) {
-    toggleSuggestPreviewBtn.disabled = !hasSuggestedMaskPreview() || running || queueBusy;
-  }
-  if (applySuggestedMaskBtn) {
-    applySuggestedMaskBtn.disabled = !hasSuggestedMaskPreview() || running || queueBusy;
-  }
   eraserBtn.disabled = running || queueBusy || !hasImage;
   clearMaskBtn.disabled = running || queueBusy || !hasImage;
   resetViewBtn.disabled = running || queueBusy || !hasImage;
@@ -834,36 +814,7 @@ function syncUi() {
   openFolderBtn.disabled = !hasOutput || running || queueBusy;
   outputFormatSelect.disabled = running || queueBusy;
   deviceSelect.disabled = running || queueBusy;
-  if (suggestStrengthInput) {
-    suggestStrengthInput.disabled = running || queueBusy;
-  }
-  if (suggestPresetLowBtn) suggestPresetLowBtn.disabled = running || queueBusy;
-  if (suggestPresetMediumBtn) suggestPresetMediumBtn.disabled = running || queueBusy;
-  if (suggestPresetHighBtn) suggestPresetHighBtn.disabled = running || queueBusy;
-  if (selectAllRegionsBtn) {
-    selectAllRegionsBtn.disabled = running || queueBusy || detectState.regions.length === 0;
-  }
-  if (selectNoneRegionsBtn) {
-    selectNoneRegionsBtn.disabled = running || queueBusy || detectState.regions.length === 0;
-  }
-
-  if (toggleSuggestPreviewBtn) {
-    toggleSuggestPreviewBtn.textContent = `Preview Suggested: ${previewSuggestedMask ? "On" : "Off"}`;
-    toggleSuggestPreviewBtn.classList.toggle("toggle-on", previewSuggestedMask);
-  }
   updatePresetButtonsUi();
-
-  if (detectionNote) {
-    if (detectState.detector) {
-      const percent = Math.round(detectState.maskedAreaRatio * 100);
-      const selected = detectState.regions.length
-        ? detectState.regions.filter((region) => region.selected).length
-        : detectState.detections;
-      detectionNote.textContent = `Detector: ${detectState.detector} | Regions: ${selected}/${detectState.detections} | Coverage: ${percent}%`;
-    } else {
-      detectionNote.textContent = "";
-    }
-  }
 
   if (jobState.error) {
     errorNote.style.display = "block";
@@ -1755,20 +1706,6 @@ brushSizeInput.addEventListener("input", () => {
   syncUi();
 });
 
-if (suggestStrengthInput) {
-  suggestStrengthInput.addEventListener("input", () => {
-    suggestStrength = Math.max(1, Math.min(100, Number(suggestStrengthInput.value) || 50));
-    const matchedPreset = Object.entries(SUGGEST_PRESET_STRENGTH)
-      .find(([, value]) => value === suggestStrength)?.[0];
-    suggestPreset = matchedPreset || "medium";
-    syncUi();
-  });
-
-  suggestStrengthInput.addEventListener("change", () => {
-    persistProjectAutoMaskSettings().catch(() => {});
-  });
-}
-
 zoomSlider.addEventListener("input", () => {
   viewState.zoom = Number(zoomSlider.value) / 100;
   syncUi();
@@ -1796,85 +1733,6 @@ resetViewBtn.addEventListener("click", () => {
 openImageBtn.addEventListener("click", async () => {
   await pickAndLoadImage();
 });
-
-if (suggestMaskBtn) {
-  suggestMaskBtn.addEventListener("click", async () => {
-    await suggestMaskForCurrentImage();
-  });
-}
-
-if (suggestQueueBtn) {
-  suggestQueueBtn.addEventListener("click", async () => {
-    await suggestMaskForCurrentImage({ queueAfter: true });
-  });
-}
-
-if (autoRemoveBtn) {
-  autoRemoveBtn.addEventListener("click", async () => {
-    await autoRemoveWatermark();
-  });
-}
-
-if (toggleSuggestPreviewBtn) {
-  toggleSuggestPreviewBtn.addEventListener("click", () => {
-    if (!hasSuggestedMaskPreview()) {
-      return;
-    }
-    previewSuggestedMask = !previewSuggestedMask;
-    persistProjectAutoMaskSettings().catch(() => {});
-    render();
-    syncUi();
-  });
-}
-
-if (applySuggestedMaskBtn) {
-  applySuggestedMaskBtn.addEventListener("click", async () => {
-    await applySuggestedMaskToEditor();
-    syncUi();
-  });
-}
-
-if (suggestPresetLowBtn) {
-  suggestPresetLowBtn.addEventListener("click", () => setSuggestPreset("low"));
-}
-if (suggestPresetMediumBtn) {
-  suggestPresetMediumBtn.addEventListener("click", () => setSuggestPreset("medium"));
-}
-if (suggestPresetHighBtn) {
-  suggestPresetHighBtn.addEventListener("click", () => setSuggestPreset("high"));
-}
-
-if (detectionRegionList) {
-  detectionRegionList.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLInputElement)) {
-      return;
-    }
-    const rawIndex = target.getAttribute("data-detect-region-index");
-    if (rawIndex === null) {
-      return;
-    }
-    const index = Number(rawIndex);
-    if (!Number.isFinite(index) || !detectState.regions[index]) {
-      return;
-    }
-    detectState.regions[index] = {
-      ...detectState.regions[index],
-      selected: Boolean(target.checked),
-    };
-    rebuildSuggestedMaskFromSelectedRegions();
-    render();
-    syncUi();
-  });
-}
-
-if (selectAllRegionsBtn) {
-  selectAllRegionsBtn.addEventListener("click", () => setAllDetectionRegions(true));
-}
-
-if (selectNoneRegionsBtn) {
-  selectNoneRegionsBtn.addEventListener("click", () => setAllDetectionRegions(false));
-}
 
 removeBtn.addEventListener("click", async () => {
   await removeWatermark();

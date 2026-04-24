@@ -2,7 +2,8 @@ const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
 const crypto = require("node:crypto");
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { url: { pathToFileURL } } = require("node:url");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell, protocol, net } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { BackendManager } = require("./backendManager");
 
@@ -244,6 +245,7 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: true,
     },
   });
 
@@ -291,6 +293,11 @@ async function bootBackendOrShowError() {
 }
 
 app.whenReady().then(async () => {
+  protocol.handle("media", (request) => {
+    const filePath = decodeURIComponent(request.url.slice("media://".length));
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
+
   createWindow();
   wireBackendEvents();
   configureAutoUpdater();
@@ -328,14 +335,27 @@ ipcMain.handle("backend:pick-image", async () => {
 ipcMain.handle("project:pick-folder", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Open Project Folder",
-    properties: ["openDirectory"],
+    properties: ["openDirectory", "openFile"],
+    filters: [
+      { name: "Images", extensions: ["png", "jpg", "jpeg"] },
+    ],
   });
 
   if (result.canceled || !result.filePaths[0]) {
     return null;
   }
 
-  return result.filePaths[0];
+  let folderPath = result.filePaths[0];
+  try {
+    const stat = fs.statSync(folderPath);
+    if (stat.isFile()) {
+      folderPath = path.dirname(folderPath);
+    }
+  } catch (err) {
+    console.error("[project:pick-folder] stat error:", err);
+  }
+
+  return folderPath;
 });
 ipcMain.handle("project:open-folder", async (_event, folderPath) => {
   if (!folderPath) {
@@ -450,11 +470,15 @@ ipcMain.handle("project:update-settings", async (_event, settingsPatch) => {
   return serializeProject(activeProject);
 });
 ipcMain.handle("backend:start-inpaint", async (_event, payload) => backend.startInpaint(payload));
-ipcMain.handle("backend:suggest-mask", async (_event, payload) => backend.suggestMask(payload));
-ipcMain.handle("backend:detect-mask", async (_event, payload) => backend.detectMask(payload));
-ipcMain.handle("backend:auto-remove", async (_event, payload) => backend.autoRemove(payload));
 ipcMain.handle("backend:get-job", async (_event, jobId) => backend.getJob(jobId));
-ipcMain.handle("backend:get-jobs", async () => backend.getJobs());
+ipcMain.handle("backend:get-jobs", async () => {
+  try {
+    return await backend.getJobs();
+  } catch (error) {
+    console.warn("[backend:get-jobs]", error?.message || error);
+    return [];
+  }
+});
 ipcMain.handle("backend:cancel-job", async (_event, jobId) => backend.cancelJob(jobId));
 ipcMain.handle("backend:write-mask", async (_event, dataUrl) => {
   if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/png;base64,")) {

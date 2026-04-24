@@ -14,8 +14,11 @@ from typing import AsyncGenerator, Dict, Literal, Optional, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 from pydantic import BaseModel, Field
+
+import numpy as np
+from scipy import ndimage
 
 
 StatusLiteral = Literal["queued", "running", "completed", "failed", "cancelled"]
@@ -54,58 +57,13 @@ class WarmupResponse(BaseModel):
     progress: ProgressEvent
 
 
-class SuggestMaskRequest(BaseModel):
-    image_path: str
-    output_path: Optional[str] = None
-    strength: int = Field(default=50, ge=1, le=100)
-
-
-class SuggestMaskResponse(BaseModel):
-    mask_path: str
-    width: int
-    height: int
-    method: str
-
-
 class DetectionBox(BaseModel):
     x: int
     y: int
     width: int
     height: int
-    confidence: float = Field(ge=0.0, le=1.0)
-    kind: Literal["watermark"] = "watermark"
-
-
-class DetectMaskRequest(BaseModel):
-    image_path: str
-    output_path: Optional[str] = None
-    strength: int = Field(default=50, ge=1, le=100)
-    min_area_ratio: float = Field(default=0.0005, ge=0.0, le=1.0)
-    min_confidence: float = Field(default=0.12, ge=0.0, le=1.0)
-    max_detections: int = Field(default=24, ge=1, le=200)
-
-
-class DetectMaskResponse(BaseModel):
-    mask_path: str
-    width: int
-    height: int
-    detector: str
-    detections: List[DetectionBox]
-    masked_area_ratio: float = Field(ge=0.0, le=1.0)
-
-
-class AutoRemoveRequest(BaseModel):
-    image_path: str
-    output_path: Optional[str] = None
-    device: Literal["cpu", "cuda", "mps"] = "cpu"
-
-
-class AutoRemoveResponse(BaseModel):
-    output_path: str
-    mask_path: str
-    detector: str
-    detections: int
-    device: Literal["cpu", "cuda", "mps"]
+    confidence: float
+    kind: str
 
 
 @dataclass
@@ -127,18 +85,21 @@ app = FastAPI(title="Watermark Remover Backend", version="0.1.0")
 warmup_lock = threading.Lock()
 warmup_status: Literal["idle", "warming", "ready", "failed"] = "idle"
 warmup_progress = ProgressEvent(stage="idle", percent=0, error=None)
+
 florence_lock = threading.Lock()
 florence_processor = None
 florence_model = None
 
 
-def auto_remove_tmp_paths(image_path: Path) -> tuple[Path, Path]:
-    root = Path.cwd() / "tmp" / "auto_remove"
-    root.mkdir(parents=True, exist_ok=True)
-    token = uuid.uuid4().hex[:10]
-    mask_path = root / f"{image_path.stem}_auto_mask_{token}.png"
-    output_path = root / f"{image_path.stem}_auto_output_{token}{image_path.suffix or '.png'}"
-    return mask_path, output_path
+def _expand_mask(mask: Image.Image, dilation_passes: int, blur_radius: float, threshold: int) -> Image.Image:
+    expanded = mask.convert("L")
+    for _ in range(max(0, int(dilation_passes))):
+        expanded = expanded.filter(ImageFilter.MaxFilter(5))
+    if blur_radius > 0:
+        expanded = expanded.filter(ImageFilter.GaussianBlur(radius=float(blur_radius)))
+    expanded = expanded.point(lambda p: 255 if p >= int(threshold) else 0).convert("L")
+    expanded = expanded.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MinFilter(3))
+    return expanded
 
 
 def florence_model_dir_path() -> Path:
@@ -311,160 +272,6 @@ def output_path_for(image_path: Path, requested_output: Optional[str]) -> Path:
     return image_path.with_name(f"{image_path.stem}_clean{suffix}")
 
 
-def suggest_mask_output_path(image_path: Path, requested_output: Optional[str]) -> Path:
-    if requested_output:
-        out = Path(requested_output).expanduser().resolve()
-        out.parent.mkdir(parents=True, exist_ok=True)
-        if out.suffix.lower() != ".png":
-            out = out.with_suffix(".png")
-        return out
-
-    root = Path.cwd() / "tmp" / "auto_mask"
-    root.mkdir(parents=True, exist_ok=True)
-    file_name = f"{image_path.stem}_suggested_mask_{uuid.uuid4().hex[:8]}.png"
-    return root / file_name
-
-
-def suggest_mask_file(image_path: Path, requested_output: Optional[str], strength: int) -> tuple[Path, tuple[int, int]]:
-    if not image_path.exists() or not image_path.is_file():
-        raise FileNotFoundError(f"image_path does not exist: {image_path}")
-
-    out_path = suggest_mask_output_path(image_path, requested_output)
-    strength_norm = max(1, min(100, int(strength)))
-
-    # Higher strength lowers thresholds and increases expansion passes.
-    edge_threshold = int(42 - (strength_norm * 0.24))
-    edge_threshold = max(10, min(48, edge_threshold))
-
-    bright_threshold = int(242 - (strength_norm * 0.45))
-    bright_threshold = max(180, min(248, bright_threshold))
-
-    dilation_passes = 1 + (strength_norm // 34)
-    final_threshold = int(50 - (strength_norm * 0.22))
-    final_threshold = max(12, min(58, final_threshold))
-
-    with Image.open(image_path) as src:
-        rgb = src.convert("RGB")
-        gray = rgb.convert("L")
-
-        # Heuristic: blend strong edges and bright regions, then expand to make brush-like masks.
-        edges = gray.filter(ImageFilter.FIND_EDGES)
-        edges_bin = edges.point(lambda p: 255 if p >= edge_threshold else 0).convert("L")
-        bright_bin = gray.point(lambda p: 255 if p >= bright_threshold else 0).convert("L")
-
-        combined = ImageChops.lighter(edges_bin, bright_bin)
-        for _ in range(dilation_passes):
-            combined = combined.filter(ImageFilter.MaxFilter(5))
-        combined = combined.filter(ImageFilter.GaussianBlur(radius=1.0))
-        mask = combined.point(lambda p: 255 if p >= final_threshold else 0).convert("L")
-
-        mask.save(out_path, format="PNG")
-        return out_path, rgb.size
-
-
-def detect_boxes_from_mask(
-    mask_path: Path,
-    width: int,
-    height: int,
-    min_area_ratio: float,
-    min_confidence: float,
-    max_detections: int,
-) -> tuple[List[DetectionBox], float]:
-    with Image.open(mask_path) as mask_img:
-        gray_mask = mask_img.convert("L")
-        data = [1 if p > 0 else 0 for p in gray_mask.getdata()]
-
-    total = max(1, width * height)
-    non_zero = sum(data)
-    area_ratio = float(non_zero) / float(total)
-    if non_zero == 0:
-        return [], area_ratio
-
-    visited = bytearray(len(data))
-    detections: List[DetectionBox] = []
-
-    for idx, value in enumerate(data):
-        if value == 0 or visited[idx]:
-            continue
-
-        stack = [idx]
-        visited[idx] = 1
-        min_x = width
-        min_y = height
-        max_x = 0
-        max_y = 0
-        pixels = 0
-
-        while stack:
-            current = stack.pop()
-            if data[current] == 0:
-                continue
-
-            x = current % width
-            y = current // width
-            pixels += 1
-
-            if x < min_x:
-                min_x = x
-            if y < min_y:
-                min_y = y
-            if x > max_x:
-                max_x = x
-            if y > max_y:
-                max_y = y
-
-            if x > 0:
-                left = current - 1
-                if not visited[left] and data[left] == 1:
-                    visited[left] = 1
-                    stack.append(left)
-            if x < (width - 1):
-                right = current + 1
-                if not visited[right] and data[right] == 1:
-                    visited[right] = 1
-                    stack.append(right)
-            if y > 0:
-                up = current - width
-                if not visited[up] and data[up] == 1:
-                    visited[up] = 1
-                    stack.append(up)
-            if y < (height - 1):
-                down = current + width
-                if not visited[down] and data[down] == 1:
-                    visited[down] = 1
-                    stack.append(down)
-
-        comp_area_ratio = float(pixels) / float(total)
-        if comp_area_ratio < float(min_area_ratio):
-            continue
-
-        box_width = max(1, (max_x - min_x) + 1)
-        box_height = max(1, (max_y - min_y) + 1)
-        box_pixels = box_width * box_height
-        box_area_ratio = float(box_pixels) / float(total)
-        density = float(pixels) / float(max(1, box_pixels))
-
-        # Confidence heuristic favors dense, compact components over giant low-density blobs.
-        confidence = 0.12 + (0.52 * density) + (0.36 * (1.0 - min(1.0, box_area_ratio * 6.0)))
-        confidence = max(0.01, min(0.99, confidence))
-        if confidence < float(min_confidence):
-            continue
-
-        detections.append(
-            DetectionBox(
-                x=int(min_x),
-                y=int(min_y),
-                width=int(box_width),
-                height=int(box_height),
-                confidence=float(confidence),
-                kind="watermark",
-            )
-        )
-
-    detections.sort(key=lambda d: (d.confidence, d.width * d.height), reverse=True)
-    return detections[: int(max_detections)], area_ratio
-
-
 def model_dir_path() -> Path:
     model_dir = Path(os.getenv("MODEL_DIR", str(Path.cwd() / "models"))).resolve()
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -575,103 +382,6 @@ def run_job(job: Job) -> None:
     finally:
         job.process = None
 
-def run_auto_remove_job(job: Job) -> None:
-    try:
-        job.status = "running"
-        push_progress(job, stage="detecting_watermark", percent=10)
-
-        image = job.image_path
-        requested_device = job.device
-
-        detector = "florence2-lama"
-        try:
-            boxes, fl_mask = detect_watermark_florence(image, requested_device)
-        except Exception:
-            # Fallback keeps one-click remove usable when Florence-2 files are not present yet.
-            boxes, fl_mask = [], None
-
-        if not boxes:
-            # First attempt: Standard heuristic
-            push_progress(job, stage="detecting_watermark", percent=20)
-            fallback_mask_path, (width, height) = suggest_mask_file(image, None, strength=58)
-            boxes, _masked_area = detect_boxes_from_mask(
-                mask_path=fallback_mask_path,
-                width=width,
-                height=height,
-                min_area_ratio=0.0005,
-                min_confidence=0.10,
-                max_detections=24,
-            )
-            detector = "stub.edge-brightness-v1-fallback-lama"
-
-            # Second attempt: More aggressive heuristic if first failed
-            if not boxes:
-                push_progress(job, stage="detecting_watermark", percent=30)
-                fallback_mask_path, (width, height) = suggest_mask_file(image, None, strength=85)
-                boxes, _masked_area = detect_boxes_from_mask(
-                    mask_path=fallback_mask_path,
-                    width=width,
-                    height=height,
-                    min_area_ratio=0.0001,
-                    min_confidence=0.05,
-                    max_detections=24,
-                )
-                if boxes:
-                    detector = "stub.edge-brightness-v1-aggressive-lama"
-
-        if not boxes:
-            raise RuntimeError("no watermark detected")
-
-        push_progress(job, stage="creating_mask", percent=40)
-        with Image.open(image) as src:
-            width, height = src.size
-
-        if detector.startswith("stub"):
-            # Use the high-quality heuristic mask directly instead of converting to rectangles
-            import shutil
-            shutil.copy(fallback_mask_path, job.mask_path)
-        elif fl_mask is not None:
-            # Use the precise segmentation mask from Florence-2 to eliminate blurriness
-            fl_mask.save(job.mask_path, format="PNG")
-        else:
-            # Fallback for Florence-2 if it only returned boxes
-            write_mask_from_boxes(job.mask_path, width, height, boxes, padding_factor=0.002)
-
-        output_path = output_path_for(image, str(job.output_path) if job.output_path else None)
-        job.output_path = output_path
-
-        push_progress(job, stage="inpainting", percent=50)
-        proc = iopaint_run(image, job.mask_path, output_path, requested_device)
-        job.process = proc
-
-        percent_re = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                line = line.strip()
-                match = percent_re.search(line)
-                if match:
-                    found = min(99, max(50, int(float(match.group(1)))))
-                    push_progress(job, stage="inpainting", percent=found)
-
-        code = proc.wait()
-        if code != 0:
-            raise RuntimeError(f"auto remove failed with exit code {code}")
-
-        push_progress(job, stage="writing_output", percent=98)
-        resolved_output = resolve_generated_output_path(output_path, image)
-        if resolved_output is None:
-            raise RuntimeError("auto remove finished but output file was not created")
-        job.output_path = resolved_output
-
-        job.status = "completed"
-        push_progress(job, stage="completed", percent=100)
-
-    except Exception as exc:
-        job.status = "failed"
-        push_progress(job, stage="failed", percent=100, error=str(exc))
-    finally:
-        job.process = None
-
 
 def set_warmup(stage: str, percent: int, error: Optional[str] = None) -> None:
     global warmup_progress
@@ -755,72 +465,6 @@ def warmup() -> WarmupResponse:
 @app.get("/warmup", response_model=WarmupResponse)
 def get_warmup() -> WarmupResponse:
     return WarmupResponse(status=warmup_status, progress=warmup_progress)
-
-
-@app.post("/mask/suggest", response_model=SuggestMaskResponse)
-def suggest_mask(req: SuggestMaskRequest) -> SuggestMaskResponse:
-    image = Path(req.image_path).expanduser().resolve()
-
-    try:
-        mask_path, (width, height) = suggest_mask_file(image, req.output_path, req.strength)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"mask suggestion failed: {exc}") from exc
-
-    return SuggestMaskResponse(
-        mask_path=str(mask_path),
-        width=width,
-        height=height,
-        method="edge-brightness-v1",
-    )
-
-
-@app.post("/mask/detect", response_model=DetectMaskResponse)
-def detect_mask(req: DetectMaskRequest) -> DetectMaskResponse:
-    image = Path(req.image_path).expanduser().resolve()
-
-    try:
-        mask_path, (width, height) = suggest_mask_file(image, req.output_path, req.strength)
-        detections, masked_area_ratio = detect_boxes_from_mask(
-            mask_path=mask_path,
-            width=width,
-            height=height,
-            min_area_ratio=req.min_area_ratio,
-            min_confidence=req.min_confidence,
-            max_detections=req.max_detections,
-        )
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"mask detection failed: {exc}") from exc
-
-    return DetectMaskResponse(
-        mask_path=str(mask_path),
-        width=width,
-        height=height,
-        detector="stub.edge-brightness-v1",
-        detections=detections,
-        masked_area_ratio=float(max(0.0, min(1.0, masked_area_ratio))),
-    )
-
-
-@app.post("/auto-remove", response_model=InpaintResponse)
-def auto_remove(req: AutoRemoveRequest) -> InpaintResponse:
-    image = Path(req.image_path).expanduser().resolve()
-    if not image.exists() or not image.is_file():
-        raise HTTPException(status_code=400, detail=f"image_path does not exist: {image}")
-
-    job_id = str(uuid.uuid4())
-    mask_path, output_path = auto_remove_tmp_paths(image)
-
-    job = Job(job_id=job_id, image_path=image, mask_path=mask_path, output_path=output_path, device=req.device)
-    with jobs_lock:
-        jobs[job_id] = job
-
-    worker = threading.Thread(target=run_auto_remove_job, args=(job,), daemon=True)
-    worker.start()
-    return InpaintResponse(job_id=job_id, status=job.status)
 
 
 @app.post("/inpaint", response_model=InpaintResponse)
