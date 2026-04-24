@@ -4,8 +4,10 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell, protocol, net } = require("electron");
-const { autoUpdater } = require("electron-updater");
-const { BackendManager } = require("./backendManager");
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: "media", privileges: { secure: true, standard: true, supportFetchAPI: true, bypassCSP: true, stream: true } },
+]);
 
 let mainWindow = null;
 const backend = new BackendManager({ host: "127.0.0.1", port: 8000 });
@@ -294,8 +296,16 @@ async function bootBackendOrShowError() {
 
 app.whenReady().then(async () => {
   protocol.handle("media", (request) => {
-    const filePath = decodeURIComponent(request.url.slice("media://".length));
-    return net.fetch(pathToFileURL(filePath).toString());
+    try {
+      const url = new URL(request.url);
+      if (url.host === "get-file") {
+        const filePath = decodeURIComponent(url.pathname.slice(1));
+        return net.fetch(pathToFileURL(filePath).toString());
+      }
+    } catch (err) {
+      console.error("[protocol:media] handler error:", err);
+    }
+    return new Response("Not Found", { status: 404 });
   });
 
   createWindow();

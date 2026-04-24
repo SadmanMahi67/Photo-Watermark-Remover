@@ -761,7 +761,8 @@ function fileUrlFromPath(filePath) {
     return "";
   }
   // Use the custom media:// protocol registered in main.js
-  return `media://${String(filePath)}`;
+  // Passing the path as a URI-encoded component ensures it's handled correctly.
+  return `media://get-file/${encodeURIComponent(String(filePath))}`;
 }
 
 function syncUi() {
