@@ -29,9 +29,22 @@ const projectImageList = document.getElementById("projectImageList");
 
 const brushSizeInput = document.getElementById("brushSize");
 const brushSizeLabel = document.getElementById("brushSizeLabel");
+const suggestStrengthInput = document.getElementById("suggestStrength");
+const suggestStrengthLabel = document.getElementById("suggestStrengthLabel");
+const suggestPresetLowBtn = document.getElementById("suggestPresetLow");
+const suggestPresetMediumBtn = document.getElementById("suggestPresetMedium");
+const suggestPresetHighBtn = document.getElementById("suggestPresetHigh");
+const detectionNote = document.getElementById("detectionNote");
+const detectionRegionList = document.getElementById("detectionRegionList");
+const selectAllRegionsBtn = document.getElementById("selectAllRegionsBtn");
+const selectNoneRegionsBtn = document.getElementById("selectNoneRegionsBtn");
 const zoomSlider = document.getElementById("zoomSlider");
 const zoomLabel = document.getElementById("zoomLabel");
 const openImageBtn = document.getElementById("openImageBtn");
+const suggestMaskBtn = document.getElementById("suggestMaskBtn");
+const suggestQueueBtn = document.getElementById("suggestQueueBtn");
+const toggleSuggestPreviewBtn = document.getElementById("toggleSuggestPreviewBtn");
+const applySuggestedMaskBtn = document.getElementById("applySuggestedMaskBtn");
 const eraserBtn = document.getElementById("eraserBtn");
 const clearMaskBtn = document.getElementById("clearMaskBtn");
 const resetViewBtn = document.getElementById("resetViewBtn");
@@ -86,6 +99,7 @@ let updateInstallAccepted = false;
 let currentTheme = "light";
 let suggestStrength = 50;
 let suggestPreset = "medium";
+let previewSuggestedMask = false;
 
 const SUGGEST_PRESET_STRENGTH = {
   low: 30,

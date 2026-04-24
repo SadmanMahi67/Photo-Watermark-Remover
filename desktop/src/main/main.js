@@ -4,6 +4,8 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell, protocol, net } = require("electron");
+const { autoUpdater } = require("electron-updater");
+const { BackendManager } = require("./backendManager");
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "media", privileges: { secure: true, standard: true, supportFetchAPI: true, bypassCSP: true, stream: true } },
